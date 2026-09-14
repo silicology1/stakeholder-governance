@@ -414,7 +414,7 @@ pub mod StakeholderConviction {
     /// Reward minted (through the same `_mint_capped` cap as everything
     /// else) to whoever successfully triggers a qualifying decay on
     /// someone else's balance. Admin-adjustable (timelocked).
-    const DEFAULT_CALLER_REWARD_AMOUNT: u256 = 1_000_000_000_000_000_000; // 1 token
+    const DEFAULT_CALLER_REWARD_AMOUNT: u256 = 1_000_000_000_000_000; // 0.001 token
 
     /// Per-caller cooldown on earning decay-trigger rewards, so a single
     /// address can't farm the reward by spamming `apply_decay` calls.
