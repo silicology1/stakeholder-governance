@@ -173,6 +173,7 @@ dependencies = [
  "openzeppelin_introspection",
  "openzeppelin_security",
  "openzeppelin_token",
+ "openzeppelin_upgrades",
  "snforge_std",
 ]
 

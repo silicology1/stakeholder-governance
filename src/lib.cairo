@@ -195,14 +195,55 @@
 //!   parameters; `is_protected_address` gets its own small parallel
 //!   `propose_set_protected_address` / `execute_set_protected_address`
 //!   pair since it's keyed by address rather than a fixed parameter.
-//! * ADMIN REMOVAL: `add_admin` / `remove_admin` are deliberately NOT
-//!   timelocked (they're gated purely by requiring an existing
-//!   DEFAULT_ADMIN_ROLE holder, same trust boundary as the rest of
-//!   AccessControl) but `remove_admin` refuses to drop the last admin,
-//!   tracked via `admin_count`. Use these two instead of calling the
-//!   embedded AccessControl `grant_role`/`revoke_role`/`renounce_role`
-//!   directly for DEFAULT_ADMIN_ROLE - going around them desyncs
-//!   `admin_count` and could let the last admin be removed after all.
+//! * ADMIN ROSTER IS NOW TIMELOCKED TOO: adding or removing an admin is no
+//!   longer instant. `propose_add_admin` / `execute_add_admin` and
+//!   `propose_remove_admin` / `execute_remove_admin` follow the same
+//!   propose-now/execute-after-`TIMELOCK_DURATION`(3 days) shape as every
+//!   other admin parameter, keyed per-target-address in
+//!   `pending_admin_changes`. `execute_remove_admin` still refuses to drop
+//!   the last admin, tracked via `admin_count`, checked again at execute
+//!   time (not just propose time) in case other removals landed in
+//!   between. Use these four instead of calling the embedded AccessControl
+//!   `grant_role`/`revoke_role`/`renounce_role` directly for
+//!   DEFAULT_ADMIN_ROLE - going around them desyncs `admin_count` and could
+//!   let the last admin be removed after all.
+//!
+//! UPGRADEABILITY (added on top of the above)
+//! --------------------------------------------
+//! * This contract embeds OpenZeppelin's `UpgradeableComponent`, so its
+//!   class hash can be swapped via Starknet's native `replace_class_syscall`
+//!   without redeploying (storage layout is preserved; only the code
+//!   changes). Upgrading is timelocked at `UPGRADE_TIMELOCK_DURATION` (7
+//!   days), longer than the 3-day `TIMELOCK_DURATION` used for ordinary
+//!   parameters, since a malicious or buggy upgrade is a much bigger blast
+//!   radius than a bad threshold or reward amount.
+//!     - `propose_upgrade(new_class_hash)` (admin-only) queues the target
+//!       class hash and stamps `effective_at = now + 7 days`, overwriting
+//!       any earlier not-yet-executed proposal.
+//!     - `execute_upgrade()` (admin-only) applies it via
+//!       `UpgradeableComponent`'s internal `upgrade`, once that time has
+//!       passed, then clears the pending slot.
+//! * `disable_upgrades_forever()` (admin-only) is a ONE-WAY switch: once
+//!   called, `upgrades_disabled` is permanently `true`, both
+//!   `propose_upgrade` and `execute_upgrade` revert forever after, any
+//!   pending (not-yet-executed) upgrade is discarded, and there is no
+//!   function anywhere in this contract that can flip `upgrades_disabled`
+//!   back to `false`. This is the intended path to making a deployment
+//!   permanently immutable once governance is confident the code is
+//!   final - use it deliberately, since it cannot be undone even by a
+//!   subsequent upgrade (an upgrade can't run once this is set, so a
+//!   "re-enable" build could never be deployed to this address).
+
+//! ADMIN-CONFIGURED num_draws (added on top of the above)
+//! -----------------------------------------------------------
+//! * `create_selection_dispute` no longer accepts a caller-supplied
+//!   `num_draws` - a caller who could pick their own draw count could bias
+//!   Sybil economics or gas costs per dispute. It now always draws
+//!   `self.num_draws.read()` jurors, a value only the admin can set, via
+//!   the same timelocked `propose_set_num_draws` / `execute_set_num_draws`
+//!   pair used for every other scalar parameter. `propose_set_num_draws`
+//!   enforces a floor of `MIN_NUM_DRAWS` (10) so the Schelling game can
+//!   never be starved down to a trivially manipulable juror count.
 
 #[starknet::interface]
 pub trait IStakeholderConviction<TContractState> {
@@ -211,8 +252,11 @@ pub trait IStakeholderConviction<TContractState> {
     fn unstake(ref self: TContractState, amount: u256);
 
     // ---- stakeholder selection (Kleros dispute lifecycle) ----
+    // num_draws is no longer caller-supplied - see module header,
+    // "ADMIN-CONFIGURED num_draws". It always uses the admin-set,
+    // timelocked `num_draws` parameter (min 10).
     fn create_selection_dispute(
-        ref self: TContractState, candidate: starknet::ContractAddress, num_draws: u32
+        ref self: TContractState, candidate: starknet::ContractAddress
     ) -> u256;
     fn commit_vote(ref self: TContractState, dispute_id: u256, commit_hash: felt252);
     fn reveal_vote(ref self: TContractState, dispute_id: u256, score: i8, salt: felt252);
@@ -283,6 +327,10 @@ pub trait IStakeholderConviction<TContractState> {
     fn execute_set_min_decay_for_reward(ref self: TContractState);
     fn propose_set_caller_reward_amount(ref self: TContractState, amount: u256);
     fn execute_set_caller_reward_amount(ref self: TContractState);
+    /// Minimum enforceable value is MIN_NUM_DRAWS (10) - see module header.
+    fn propose_set_num_draws(ref self: TContractState, num_draws: u32);
+    fn execute_set_num_draws(ref self: TContractState);
+    fn get_num_draws(self: @TContractState) -> u32;
     fn propose_set_protected_address(ref self: TContractState, target: starknet::ContractAddress, protected: bool);
     fn execute_set_protected_address(ref self: TContractState, target: starknet::ContractAddress);
     fn get_pending_change(self: @TContractState, param_key: felt252) -> StakeholderConviction::PendingChange;
@@ -290,10 +338,25 @@ pub trait IStakeholderConviction<TContractState> {
         self: @TContractState, target: starknet::ContractAddress
     ) -> StakeholderConviction::PendingProtectedChange;
 
-    // ---- admin roster (NOT timelocked - see module header) ----
-    fn add_admin(ref self: TContractState, new_admin: starknet::ContractAddress);
-    fn remove_admin(ref self: TContractState, admin_to_remove: starknet::ContractAddress);
+    // ---- admin roster (timelocked - see module header, "ADMIN ROSTER IS
+    // NOW TIMELOCKED TOO") ----
+    fn propose_add_admin(ref self: TContractState, new_admin: starknet::ContractAddress);
+    fn execute_add_admin(ref self: TContractState, new_admin: starknet::ContractAddress);
+    fn propose_remove_admin(ref self: TContractState, admin_to_remove: starknet::ContractAddress);
+    fn execute_remove_admin(ref self: TContractState, admin_to_remove: starknet::ContractAddress);
+    fn get_pending_admin_change(
+        self: @TContractState, target: starknet::ContractAddress
+    ) -> StakeholderConviction::PendingAdminChange;
     fn admin_count(self: @TContractState) -> u32;
+
+    // ---- upgradeability (see module header, "UPGRADEABILITY") ----
+    fn propose_upgrade(ref self: TContractState, new_class_hash: starknet::ClassHash);
+    fn execute_upgrade(ref self: TContractState);
+    /// One-way switch: once called, upgrades are disabled permanently and
+    /// this cannot be reversed by any function in this contract.
+    fn disable_upgrades_forever(ref self: TContractState);
+    fn is_upgrades_disabled(self: @TContractState) -> bool;
+    fn get_pending_upgrade(self: @TContractState) -> StakeholderConviction::PendingUpgrade;
 
     // ---- views ----
     fn get_dispute(self: @TContractState, dispute_id: u256) -> StakeholderConviction::Dispute;
@@ -310,7 +373,7 @@ pub mod StakeholderConviction {
     use core::array::ArrayTrait;
     use core::num::traits::Zero;
     use core::poseidon::poseidon_hash_span;
-    use starknet::{ContractAddress, get_caller_address, get_block_timestamp, get_contract_address};
+    use starknet::{ContractAddress, ClassHash, get_caller_address, get_block_timestamp, get_contract_address};
     use starknet::storage::{
         Map, StoragePathEntry, StoragePointerReadAccess, StoragePointerWriteAccess,
     };
@@ -321,6 +384,13 @@ pub mod StakeholderConviction {
     use openzeppelin_access::accesscontrol::DEFAULT_ADMIN_ROLE;
     use openzeppelin_introspection::src5::SRC5Component;
     use openzeppelin_security::reentrancyguard::ReentrancyGuardComponent;
+    // Upgradeability: gives this contract `UpgradeableComponent::InternalImpl::upgrade`,
+    // a thin wrapper around Starknet's native `replace_class_syscall`. No
+    // external entrypoint is embedded from the component itself - this
+    // contract exposes its own `propose_upgrade` / `execute_upgrade` pair
+    // (below) that calls the internal `upgrade` only once the 7-day
+    // timelock has elapsed - see module header, "UPGRADEABILITY".
+    use openzeppelin_upgrades::upgradeable::UpgradeableComponent;
 
     // Cartridge VRF: synchronous, onchain-verified randomness.
     // Scarb.toml needs: cartridge_vrf = { git = "https://github.com/cartridge-gg/vrf" }
@@ -334,6 +404,7 @@ pub mod StakeholderConviction {
         path: ReentrancyGuardComponent, storage: reentrancyguard, event: ReentrancyGuardEvent
     );
     component!(path: VrfConsumerComponent, storage: vrf_consumer, event: VrfConsumerEvent);
+    component!(path: UpgradeableComponent, storage: upgradeable, event: UpgradeableEvent);
 
     // Standard IERC20 surface (transfer, transfer_from, approve, balance_of,
     // total_supply, allowance) - embedded straight into this contract's ABI.
@@ -356,6 +427,11 @@ pub mod StakeholderConviction {
     #[abi(embed_v0)]
     impl VrfConsumerImpl = VrfConsumerComponent::VrfConsumerImpl<ContractState>;
     impl VrfConsumerInternalImpl = VrfConsumerComponent::InternalImpl<ContractState>;
+
+    // No embed_v0 here deliberately: the component's internal `upgrade` is
+    // only ever called from this contract's own timelocked `execute_upgrade`
+    // below, never exposed as a raw entrypoint on its own.
+    impl UpgradeableInternalImpl = UpgradeableComponent::InternalImpl<ContractState>;
 
     // //////////////////////////////////////////////////////////////
                               // CONSTANTS
@@ -393,10 +469,23 @@ pub mod StakeholderConviction {
     const MAX_SUPPLY: u256 = 50_000_000_000_000_000_000_000_000;
     const INITIAL_SUPPLY: u256 = 10_000_000_000_000_000_000_000_000;
 
-    /// Every admin-configurable parameter must be proposed, then can only
-    /// be executed after this delay has elapsed - see module header,
-    /// "ADMIN TIMELOCK".
+    /// Every admin-configurable parameter (including the admin roster and
+    /// num_draws) must be proposed, then can only be executed after this
+    /// delay has elapsed - see module header, "ADMIN TIMELOCK".
     const TIMELOCK_DURATION: u64 = 259_200; // 3 days
+
+    /// Class-hash upgrades use a longer, separate timelock than ordinary
+    /// parameters - see module header, "UPGRADEABILITY".
+    const UPGRADE_TIMELOCK_DURATION: u64 = 604_800; // 7 days
+
+    /// Floor enforced on the admin-configurable `num_draws` value used by
+    /// every `create_selection_dispute` call - see module header,
+    /// "ADMIN-CONFIGURED num_draws".
+    const MIN_NUM_DRAWS: u32 = 10;
+    /// Constructor default for `num_draws`, itself admin-adjustable
+    /// afterwards (timelocked, floor MIN_NUM_DRAWS) via
+    /// propose/execute_set_num_draws.
+    const DEFAULT_NUM_DRAWS: u32 = 10;
 
     /// Default hourly-stepped annual decay rate applied to holders of this
     /// contract's own transferable ERC20 via `apply_decay` /
@@ -437,6 +526,7 @@ pub mod StakeholderConviction {
     const PARAM_DECAY_RATE_BPS: felt252 = 'DECAY_RATE_BPS';
     const PARAM_MIN_DECAY_FOR_REWARD: felt252 = 'MIN_DECAY_FOR_REWARD';
     const PARAM_CALLER_REWARD_AMOUNT: felt252 = 'CALLER_REWARD_AMOUNT';
+    const PARAM_NUM_DRAWS: felt252 = 'NUM_DRAWS';
 
     // //////////////////////////////////////////////////////////////
                               // STRUCTS
@@ -516,6 +606,27 @@ pub mod StakeholderConviction {
         pub exists: bool,
     }
 
+    /// A queued class-hash upgrade, subject to `UPGRADE_TIMELOCK_DURATION`
+    /// (7 days) rather than the ordinary `TIMELOCK_DURATION` - see module
+    /// header, "UPGRADEABILITY".
+    #[derive(Drop, Serde, Copy, starknet::Store)]
+    pub struct PendingUpgrade {
+        pub new_class_hash: ClassHash,
+        pub effective_at: u64,
+        pub exists: bool,
+    }
+
+    /// A queued admin-roster change, keyed by the target address.
+    /// `is_add == true` means "grant DEFAULT_ADMIN_ROLE to `target` on
+    /// execute", `is_add == false` means "revoke it" - see module header,
+    /// "ADMIN ROSTER IS NOW TIMELOCKED TOO".
+    #[derive(Drop, Serde, Copy, starknet::Store)]
+    pub struct PendingAdminChange {
+        pub is_add: bool,
+        pub effective_at: u64,
+        pub exists: bool,
+    }
+
     // //////////////////////////////////////////////////////////////
                               // STORAGE
     // //////////////////////////////////////////////////////////////
@@ -532,6 +643,14 @@ pub mod StakeholderConviction {
         reentrancyguard: ReentrancyGuardComponent::Storage,
         #[substorage(v0)]
         vrf_consumer: VrfConsumerComponent::Storage,
+        #[substorage(v0)]
+        upgradeable: UpgradeableComponent::Storage,
+
+        // ---- upgradeability - see module header, "UPGRADEABILITY" ----
+        pending_upgrade: PendingUpgrade,
+        /// One-way: once true, nothing in this contract can set it back to
+        /// false. See `disable_upgrades_forever`.
+        upgrades_disabled: bool,
 
         // stake_token is gone: jurors now stake THIS contract's own ERC20
         // balance (self.erc20), so no external stake-token address is
@@ -550,6 +669,10 @@ pub mod StakeholderConviction {
         /// rewards entirely. Every mint it triggers is capped by
         /// `_mint_capped` against `MAX_SUPPLY`.
         conviction_reward_amount: u256,
+        /// Number of jurors drawn per selection dispute. Admin-set only
+        /// (no longer caller-supplied), timelocked, floor MIN_NUM_DRAWS
+        /// (10) - see module header, "ADMIN-CONFIGURED num_draws".
+        num_draws: u32,
 
         // ---- staking / Fenwick tree over juror slots (identical mechanism
         // to the reference KlerosSchelling contract) ----
@@ -601,8 +724,11 @@ pub mod StakeholderConviction {
         pending_changes: Map<felt252, PendingChange>,
         pending_protected: Map<ContractAddress, PendingProtectedChange>,
 
-        // ---- admin roster - tracked only so `remove_admin` can refuse to
-        // drop the last remaining admin; see module header ----
+        // ---- admin roster - timelocked, keyed per-target-address; see
+        // module header, "ADMIN ROSTER IS NOW TIMELOCKED TOO". admin_count
+        // is tracked so `execute_remove_admin` can refuse to drop the last
+        // remaining admin. ----
+        pending_admin_changes: Map<ContractAddress, PendingAdminChange>,
         admin_count: u32,
     }
 
@@ -623,6 +749,8 @@ pub mod StakeholderConviction {
         ReentrancyGuardEvent: ReentrancyGuardComponent::Event,
         #[flat]
         VrfConsumerEvent: VrfConsumerComponent::Event,
+        #[flat]
+        UpgradeableEvent: UpgradeableComponent::Event,
 
         Staked: Staked,
         Unstaked: Unstaked,
@@ -648,8 +776,13 @@ pub mod StakeholderConviction {
         ChangeExecuted: ChangeExecuted,
         ProtectedAddressProposed: ProtectedAddressProposed,
         ProtectedAddressSet: ProtectedAddressSet,
+        AdminAddProposed: AdminAddProposed,
         AdminAdded: AdminAdded,
+        AdminRemoveProposed: AdminRemoveProposed,
         AdminRemoved: AdminRemoved,
+        UpgradeProposed: UpgradeProposed,
+        UpgradeExecuted: UpgradeExecuted,
+        UpgradesDisabledForever: UpgradesDisabledForever,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -860,15 +993,48 @@ pub mod StakeholderConviction {
     }
 
     #[derive(Drop, starknet::Event)]
+    struct AdminAddProposed {
+        #[key]
+        new_admin: ContractAddress,
+        effective_at: u64,
+    }
+
+    #[derive(Drop, starknet::Event)]
     struct AdminAdded {
         #[key]
         admin: ContractAddress,
     }
 
     #[derive(Drop, starknet::Event)]
+    struct AdminRemoveProposed {
+        #[key]
+        admin_to_remove: ContractAddress,
+        effective_at: u64,
+    }
+
+    #[derive(Drop, starknet::Event)]
     struct AdminRemoved {
         #[key]
         admin: ContractAddress,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct UpgradeProposed {
+        #[key]
+        new_class_hash: ClassHash,
+        effective_at: u64,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct UpgradeExecuted {
+        #[key]
+        new_class_hash: ClassHash,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct UpgradesDisabledForever {
+        #[key]
+        by: ContractAddress,
     }
 
     // //////////////////////////////////////////////////////////////
@@ -908,6 +1074,16 @@ pub mod StakeholderConviction {
         self.conviction_threshold.write(conviction_threshold);
         self.conviction_reward_amount.write(conviction_reward_amount);
 
+        // num_draws default - admin-adjustable afterwards (timelocked,
+        // floor MIN_NUM_DRAWS) via propose/execute_set_num_draws. See
+        // module header, "ADMIN-CONFIGURED num_draws".
+        self.num_draws.write(DEFAULT_NUM_DRAWS);
+
+        // Upgrades start enabled; only `disable_upgrades_forever` can ever
+        // flip this, and it can never flip back - see module header,
+        // "UPGRADEABILITY".
+        self.upgrades_disabled.write(false);
+
         // Decay defaults - all admin-adjustable afterwards via the
         // timelocked propose/execute_set_* pairs, see module header.
         self.decay_rate_bps.write(DEFAULT_DECAY_RATE_BPS);
@@ -915,7 +1091,8 @@ pub mod StakeholderConviction {
         self.caller_reward_amount.write(DEFAULT_CALLER_REWARD_AMOUNT);
 
         // The deployer-supplied `admin` above is the one and only admin at
-        // deploy time - see `add_admin`/`remove_admin`.
+        // deploy time - see `propose_add_admin`/`execute_add_admin` and
+        // `propose_remove_admin`/`execute_remove_admin`.
         self.admin_count.write(1);
 
         // One-time initial mint, routed through the same capped mint path
@@ -984,11 +1161,15 @@ pub mod StakeholderConviction {
         // ----------------------------------------------------------
 
         fn create_selection_dispute(
-            ref self: ContractState, candidate: ContractAddress, num_draws: u32
+            ref self: ContractState, candidate: ContractAddress
         ) -> u256 {
             self.reentrancyguard.start();
             assert(candidate.is_non_zero(), 'ZeroAddress');
-            assert(num_draws > 0, 'InvalidNumDraws');
+
+            // Admin-configured, timelocked, floor MIN_NUM_DRAWS (10) - see
+            // module header, "ADMIN-CONFIGURED num_draws". No longer
+            // caller-supplied.
+            let num_draws = self.num_draws.read();
 
             // Computed once, reused for every draw - see module CAVEATS.
             let total_weight = self._fenwick_total();
@@ -1711,6 +1892,23 @@ pub mod StakeholderConviction {
             self.caller_reward_amount.write(value);
         }
 
+        /// Enforces the MIN_NUM_DRAWS (10) floor at propose time - see
+        /// module header, "ADMIN-CONFIGURED num_draws".
+        fn propose_set_num_draws(ref self: ContractState, num_draws: u32) {
+            assert(num_draws >= MIN_NUM_DRAWS, 'BelowMinNumDraws');
+            self._propose_change(PARAM_NUM_DRAWS, num_draws.into());
+        }
+
+        fn execute_set_num_draws(ref self: ContractState) {
+            let value = self._execute_change(PARAM_NUM_DRAWS);
+            let value_u32: u32 = value.try_into().unwrap();
+            self.num_draws.write(value_u32);
+        }
+
+        fn get_num_draws(self: @ContractState) -> u32 {
+            self.num_draws.read()
+        }
+
         fn propose_set_protected_address(ref self: ContractState, target: ContractAddress, protected: bool) {
             self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
             assert(target.is_non_zero(), 'ZeroAddress');
@@ -1744,32 +1942,148 @@ pub mod StakeholderConviction {
         }
 
         // ---- admin roster ----
-        // Deliberately NOT timelocked - see module header, "ADMIN REMOVAL".
+        // Now timelocked (TIMELOCK_DURATION, 3 days) - see module header,
+        // "ADMIN ROSTER IS NOW TIMELOCKED TOO".
 
-        fn add_admin(ref self: ContractState, new_admin: ContractAddress) {
+        fn propose_add_admin(ref self: ContractState, new_admin: ContractAddress) {
             self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
             assert(new_admin.is_non_zero(), 'ZeroAddress');
             assert(!self.accesscontrol.has_role(DEFAULT_ADMIN_ROLE, new_admin), 'AlreadyAdmin');
+            let effective_at = get_block_timestamp() + TIMELOCK_DURATION;
+            self
+                .pending_admin_changes
+                .entry(new_admin)
+                .write(PendingAdminChange { is_add: true, effective_at, exists: true });
+            self.emit(AdminAddProposed { new_admin, effective_at });
+        }
+
+        fn execute_add_admin(ref self: ContractState, new_admin: ContractAddress) {
+            self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
+            let pc = self.pending_admin_changes.entry(new_admin).read();
+            assert(pc.exists, 'NoPendingChange');
+            assert(pc.is_add, 'NotAnAddProposal');
+            assert(get_block_timestamp() >= pc.effective_at, 'TimelockNotElapsed');
+            assert(!self.accesscontrol.has_role(DEFAULT_ADMIN_ROLE, new_admin), 'AlreadyAdmin');
+            self
+                .pending_admin_changes
+                .entry(new_admin)
+                .write(PendingAdminChange { is_add: false, effective_at: 0, exists: false });
             self.accesscontrol._grant_role(DEFAULT_ADMIN_ROLE, new_admin);
             self.admin_count.write(self.admin_count.read() + 1);
             self.emit(AdminAdded { admin: new_admin });
         }
 
-        /// Revokes DEFAULT_ADMIN_ROLE from `admin_to_remove`. Reverts with
-        /// 'CannotRemoveLastAdmin' if that would leave the contract with
-        /// zero admins - use `add_admin` to install a successor first.
-        fn remove_admin(ref self: ContractState, admin_to_remove: ContractAddress) {
+        fn propose_remove_admin(ref self: ContractState, admin_to_remove: ContractAddress) {
             self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
+            assert(self.accesscontrol.has_role(DEFAULT_ADMIN_ROLE, admin_to_remove), 'NotAnAdmin');
+            let effective_at = get_block_timestamp() + TIMELOCK_DURATION;
+            self
+                .pending_admin_changes
+                .entry(admin_to_remove)
+                .write(PendingAdminChange { is_add: false, effective_at, exists: true });
+            self.emit(AdminRemoveProposed { admin_to_remove, effective_at });
+        }
+
+        /// Revokes DEFAULT_ADMIN_ROLE from `admin_to_remove` once the
+        /// timelock has elapsed. Reverts with 'CannotRemoveLastAdmin' if
+        /// that would leave the contract with zero admins - use
+        /// `propose_add_admin`/`execute_add_admin` to install a successor
+        /// first. The last-admin check is re-verified here (not just at
+        /// propose time) in case other removals executed in the meantime.
+        fn execute_remove_admin(ref self: ContractState, admin_to_remove: ContractAddress) {
+            self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
+            let pc = self.pending_admin_changes.entry(admin_to_remove).read();
+            assert(pc.exists, 'NoPendingChange');
+            assert(!pc.is_add, 'NotARemoveProposal');
+            assert(get_block_timestamp() >= pc.effective_at, 'TimelockNotElapsed');
             assert(self.accesscontrol.has_role(DEFAULT_ADMIN_ROLE, admin_to_remove), 'NotAnAdmin');
             let count = self.admin_count.read();
             assert(count > 1, 'CannotRemoveLastAdmin');
+            self
+                .pending_admin_changes
+                .entry(admin_to_remove)
+                .write(PendingAdminChange { is_add: false, effective_at: 0, exists: false });
             self.accesscontrol._revoke_role(DEFAULT_ADMIN_ROLE, admin_to_remove);
             self.admin_count.write(count - 1);
             self.emit(AdminRemoved { admin: admin_to_remove });
         }
 
+        fn get_pending_admin_change(self: @ContractState, target: ContractAddress) -> PendingAdminChange {
+            self.pending_admin_changes.entry(target).read()
+        }
+
         fn admin_count(self: @ContractState) -> u32 {
             self.admin_count.read()
+        }
+
+        // ----------------------------------------------------------
+                          // UPGRADEABILITY
+        // ----------------------------------------------------------
+        // See module header, "UPGRADEABILITY". propose_upgrade queues a
+        // class hash with a 7-day timelock (UPGRADE_TIMELOCK_DURATION,
+        // deliberately longer than the 3-day TIMELOCK_DURATION used for
+        // ordinary parameters); execute_upgrade applies it via the
+        // embedded UpgradeableComponent's internal `upgrade`, which itself
+        // wraps Starknet's native `replace_class_syscall`.
+        // disable_upgrades_forever is a one-way switch - see its own
+        // docstring below.
+
+        fn propose_upgrade(ref self: ContractState, new_class_hash: ClassHash) {
+            self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
+            assert(!self.upgrades_disabled.read(), 'UpgradesDisabledForever');
+            let hash_felt: felt252 = new_class_hash.into();
+            assert(hash_felt.is_non_zero(), 'ZeroClassHash');
+            let effective_at = get_block_timestamp() + UPGRADE_TIMELOCK_DURATION;
+            self
+                .pending_upgrade
+                .write(PendingUpgrade { new_class_hash, effective_at, exists: true });
+            self.emit(UpgradeProposed { new_class_hash, effective_at });
+        }
+
+        fn execute_upgrade(ref self: ContractState) {
+            self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
+            assert(!self.upgrades_disabled.read(), 'UpgradesDisabledForever');
+            let pu = self.pending_upgrade.read();
+            assert(pu.exists, 'NoPendingUpgrade');
+            assert(get_block_timestamp() >= pu.effective_at, 'TimelockNotElapsed');
+            self
+                .pending_upgrade
+                .write(
+                    PendingUpgrade {
+                        new_class_hash: 0.try_into().unwrap(), effective_at: 0, exists: false,
+                    },
+                );
+            self.upgradeable.upgrade(pu.new_class_hash);
+            self.emit(UpgradeExecuted { new_class_hash: pu.new_class_hash });
+        }
+
+        /// ONE-WAY: once called, `upgrades_disabled` is permanently `true`.
+        /// Both `propose_upgrade` and `execute_upgrade` revert forever
+        /// after this, any not-yet-executed pending upgrade is discarded,
+        /// and no function in this contract can ever set
+        /// `upgrades_disabled` back to `false` - see module header,
+        /// "UPGRADEABILITY". Use only once governance is confident the
+        /// deployed code is final.
+        fn disable_upgrades_forever(ref self: ContractState) {
+            self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
+            assert(!self.upgrades_disabled.read(), 'AlreadyDisabled');
+            self
+                .pending_upgrade
+                .write(
+                    PendingUpgrade {
+                        new_class_hash: 0.try_into().unwrap(), effective_at: 0, exists: false,
+                    },
+                );
+            self.upgrades_disabled.write(true);
+            self.emit(UpgradesDisabledForever { by: get_caller_address() });
+        }
+
+        fn is_upgrades_disabled(self: @ContractState) -> bool {
+            self.upgrades_disabled.read()
+        }
+
+        fn get_pending_upgrade(self: @ContractState) -> PendingUpgrade {
+            self.pending_upgrade.read()
         }
 
         // ----------------------------------------------------------
