@@ -11,12 +11,15 @@
 //! increase total supply are both internal, both in this file:
 //!   1. the constructor's one-time `INITIAL_SUPPLY` mint, and
 //!   2. `_distribute_conviction_rewards`, called only from `execute_proposal`.
+//!   3. the slash-keeper reward in `slash_non_revealer` (see "JUROR STAKE
+//!      LOCKING" below).
 //! Every mint - including the constructor's - goes through `_mint_capped`,
 //! which asserts `total_supply() + amount <= MAX_SUPPLY` first.
 //!
 //!   STAGE 1 - SELECTION (Kleros-style Schelling game)
 //!   ---------------------------------------------------
-//!   A `candidate` address is put up for evaluation via `create_selection_dispute`.
+//!   A candidate puts themselves up for evaluation via `request_evaluation`
+//!   (opt-in, bonded - see "OPT-IN EVALUATION WITH A BOND" below).
 //!   Jurors stake this contract's own token (Fenwick-tree weighted
 //!   sortition, exactly the mechanism from the reference KlerosSchelling
 //!   contract this file was built alongside) and are drawn with
@@ -105,21 +108,23 @@
 //!       initial-liquidity wallet, etc. - whatever the deployer wants).
 //!   That leaves 40,000,000 tokens of headroom that can only ever enter
 //!   circulation gradually, through `_mint_capped` calls inside
-//!   `_distribute_conviction_rewards` as proposals execute. If that
-//!   headroom is fully minted out, any further `execute_proposal` call
-//!   whose proposal has `total_power > 0` and a nonzero
-//!   `conviction_reward_amount` will revert on the capped mint - lower or
-//!   zero `conviction_reward_amount` (`set_conviction_reward_amount`)
-//!   before that happens if you want proposals to keep executing without
-//!   reward payouts once the cap is close.
+//!   `_distribute_conviction_rewards` as proposals execute (and, now, small
+//!   slash-keeper rewards - see "JUROR STAKE LOCKING"). If that headroom is
+//!   fully minted out, any further mint-triggering call will revert on the
+//!   capped mint - lower or zero `conviction_reward_amount`
+//!   (`set_conviction_reward_amount`) before that happens if you want
+//!   proposals to keep executing without reward payouts once the cap is
+//!   close.
 //!
 //! CAVEATS (read before deploying)
 //! --------------------------------
 //! * RANDOMNESS: exactly the same Cartridge VRF calling pattern as the
-//!   reference KlerosSchelling contract - `create_selection_dispute` consumes
+//!   reference KlerosSchelling contract - `request_evaluation` consumes
 //!   ONE verified random felt252 and derives all `num_draws` per-draw values
-//!   by Poseidon-hashing that seed with a draw index. Whoever calls
-//!   `create_selection_dispute` MUST prefix that call, in the same
+//!   by Poseidon-hashing that seed with a draw index (and, now, a redraw
+//!   attempt counter when the first-drawn juror is at their concurrent-lock
+//!   cap - see "JUROR STAKE LOCKING"). Whoever calls
+//!   `request_evaluation` MUST prefix that call, in the same
 //!   multicall, with:
 //!     VRF.request_random(caller: <this_contract>, source: Source::Nonce(<this_contract>))
 //!   See https://www.starknet.io/cairo-book/ch103-05-02-randomness.html.
@@ -153,97 +158,111 @@
 //!   an increasingly expensive balance read. Fine for the expected
 //!   cadence (one grant per successful selection dispute), worth capping in
 //!   production if that assumption changes.
-//! * LOCKED STAKE (jurors): as in the reference contract, this draft does
-//!   not stop a juror from unstaking immediately after being drawn, before
-//!   commit/reveal. A production version should track locked-per-dispute
-//!   stake and block `unstake` below it.
 //! * NOT COMPILED: this file has not been run through `scarb build` in this
 //!   environment. Read it as a careful structural draft, not an audited,
 //!   deployed artifact. Compile, test (especially `_isqrt`, the decay math,
-//!   the trimmed-mean scoring against a reference Python model, and the
-//!   supply-cap arithmetic in `_mint_capped`), and get it audited before
-//!   deploying.
+//!   the trimmed-mean scoring against a reference Python model, the
+//!   supply-cap arithmetic in `_mint_capped`, and the new lock-accounting
+//!   math below), and get it audited before deploying.
 //!
-//! BALANCE DECAY + ADMIN TIMELOCK (added on top of the above)
-//! --------------------------------------------------------------
-//! * DECAY: this contract's own transferable ERC20 balances (the same
-//!   token described under SUPPLY above) now also decay - a permissionless
-//!   `apply_decay(user)` / `batch_apply_decay(users)` burns a linear,
-//!   hourly-stepped slice of `user`'s balance at an admin-tunable annual
-//!   rate (`decay_rate_bps`, default 500 = 5%/year). This is a *different*
-//!   decay mechanism from the Stage 2 governance-grant decay above: that
-//!   one is per-grant and lazy-computed on read with no state-changing
-//!   call required; this one is per-holder-address, requires someone to
-//!   call `apply_decay`, and actually burns tokens via `_mint_capped`'s
-//!   sibling `erc20.burn`. See `_apply_decay` for the exact formula and,
-//!   importantly, its caveat about transfers not resetting the clock.
-//!   Whoever triggers a large-enough decay on someone else's balance earns
-//!   `caller_reward_amount` (minted, capped by `MAX_SUPPLY` same as every
-//!   other mint), subject to a minimum decay size (`min_decay_for_reward`)
-//!   and a per-caller cooldown, to discourage both dust-spam and
-//!   self-farming. `is_protected_address` addresses (e.g. this contract's
-//!   own treasury, a liquidity pool, an exchange hot wallet) are exempt.
-//! * ADMIN TIMELOCK: every admin-configurable parameter - funding_token,
-//!   conviction_threshold, conviction_reward_amount, vrf_provider,
-//!   commit/reveal durations, non_reveal_slash_bps, and the three new decay
-//!   parameters - now goes through a `propose_set_X` / `execute_set_X` pair
-//!   instead of a single instant setter. `propose_set_X` (admin-only)
-//!   queues the change and stamps it `now + TIMELOCK_DURATION` (3 days);
-//!   `execute_set_X` (admin-only) applies it once that time has passed.
-//!   One generic engine (`_propose_change` / `_execute_change`, keyed by a
-//!   short-string `felt252` per parameter) backs all of the scalar/address
-//!   parameters; `is_protected_address` gets its own small parallel
-//!   `propose_set_protected_address` / `execute_set_protected_address`
-//!   pair since it's keyed by address rather than a fixed parameter.
-//! * ADMIN ROSTER IS NOW TIMELOCKED TOO: adding or removing an admin is no
-//!   longer instant. `propose_add_admin` / `execute_add_admin` and
-//!   `propose_remove_admin` / `execute_remove_admin` follow the same
-//!   propose-now/execute-after-`TIMELOCK_DURATION`(3 days) shape as every
-//!   other admin parameter, keyed per-target-address in
-//!   `pending_admin_changes`. `execute_remove_admin` still refuses to drop
-//!   the last admin, tracked via `admin_count`, checked again at execute
-//!   time (not just propose time) in case other removals landed in
-//!   between. Use these four instead of calling the embedded AccessControl
-//!   `grant_role`/`revoke_role`/`renounce_role` directly for
-//!   DEFAULT_ADMIN_ROLE - going around them desyncs `admin_count` and could
-//!   let the last admin be removed after all.
+//! JUROR STAKE LOCKING (added on top of the above - "stake once, serve many
+//! disputes per month" without the slashing-evasion hole)
+//! --------------------------------------------------------------------------
+//! * THE BUG THIS CLOSES: previously, `juror_stake` was a single live
+//!   balance with no link to "currently owed a reveal on some dispute". A
+//!   juror could get drawn, immediately `unstake` everything, then ignore
+//!   commit/reveal for every dispute they were drawn into - `slash_non_revealer`
+//!   would compute `slash_amount` off a now-zero stake and slash nothing.
+//! * THE FIX: every juror now has `juror_locked_total`, the SUM of
+//!   stake-at-draw-time snapshots across every dispute they are currently
+//!   drawn into and have not yet resolved. `unstake` asserts
+//!   `current_stake - withdraw_amount >= juror_locked_total`. A snapshot is
+//!   taken (and added to the sum) the first time a juror is drawn into a
+//!   given dispute, in `request_evaluation`; it is released (and
+//!   subtracted back out) exactly once, by whichever of `reveal_vote`
+//!   (honest path) or `slash_non_revealer` (punished path) fires first,
+//!   via the shared, idempotent `_release_dispute_lock` helper.
+//! * THIS IS DELIBERATELY CONSERVATIVE: the lock is a SUM of draw-time
+//!   snapshots across all open disputes, not the true worst-case slash
+//!   exposure (which is bounded by *current* stake regardless of how many
+//!   disputes are open, since `slash_non_revealer` slashes a bps of live
+//!   stake, not the snapshot). A juror drawn into 5 concurrent disputes
+//!   with 10k staked will show up to 50k locked even though at most
+//!   `non_reveal_slash_bps` of the current 10k can ever actually be taken
+//!   in one slash. This is intentionally simple and safe to reason about
+//!   rather than trying to track a tighter, fluctuating bound.
+//! * CONCURRENCY CAP: because locking is additive across open disputes, a
+//!   juror who is drawn very often (the whole point of staking once for a
+//!   month of disputes) can otherwise end up with all their stake
+//!   immobilized. `MAX_CONCURRENT_JUROR_LOCKS` (15) caps how many
+//!   simultaneously-open dispute locks a juror can carry; past that, they
+//!   are skipped in `request_evaluation`'s draw (via a deterministic,
+//!   VRF-free reseed/redraw - see `MAX_REDRAW_ATTEMPTS`) rather than seated,
+//!   so draws route to jurors with unlocked capacity instead of reverting
+//!   the whole dispute or exceeding the cap. Tune this constant (and
+//!   `commit_duration`/`reveal_duration`, which bound how fast locks clear)
+//!   against your expected disputes-per-month and active-juror count.
+//! * KEEPER REWARD ON SLASH: `slash_non_revealer` is permissionless but was
+//!   previously unrewarded, so a non-revealer's lock could sit stuck
+//!   forever if nobody bothered to call it. `SLASH_KEEPER_REWARD` (minted
+//!   through the same capped `_mint_capped` path as everything else) is
+//!   paid to whoever successfully calls `slash_non_revealer` on someone
+//!   else (self-slashing earns nothing), so locks reliably clear promptly.
+//! * VIEWS: `get_juror_locked_stake`, `get_juror_unlocked_stake`, and
+//!   `get_juror_open_dispute_count` expose this accounting for UIs/keepers
+//!   deciding whether a juror can safely unstake or is near the
+//!   concurrency cap.
 //!
-//! UPGRADEABILITY (added on top of the above)
-//! --------------------------------------------
-//! * This contract embeds OpenZeppelin's `UpgradeableComponent`, so its
-//!   class hash can be swapped via Starknet's native `replace_class_syscall`
-//!   without redeploying (storage layout is preserved; only the code
-//!   changes). Upgrading is timelocked at `UPGRADE_TIMELOCK_DURATION` (7
-//!   days), longer than the 3-day `TIMELOCK_DURATION` used for ordinary
-//!   parameters, since a malicious or buggy upgrade is a much bigger blast
-//!   radius than a bad threshold or reward amount.
-//!     - `propose_upgrade(new_class_hash)` (admin-only) queues the target
-//!       class hash and stamps `effective_at = now + 7 days`, overwriting
-//!       any earlier not-yet-executed proposal.
-//!     - `execute_upgrade()` (admin-only) applies it via
-//!       `UpgradeableComponent`'s internal `upgrade`, once that time has
-//!       passed, then clears the pending slot.
-//! * `disable_upgrades_forever()` (admin-only) is a ONE-WAY switch: once
-//!   called, `upgrades_disabled` is permanently `true`, both
-//!   `propose_upgrade` and `execute_upgrade` revert forever after, any
-//!   pending (not-yet-executed) upgrade is discarded, and there is no
-//!   function anywhere in this contract that can flip `upgrades_disabled`
-//!   back to `false`. This is the intended path to making a deployment
-//!   permanently immutable once governance is confident the code is
-//!   final - use it deliberately, since it cannot be undone even by a
-//!   subsequent upgrade (an upgrade can't run once this is set, so a
-//!   "re-enable" build could never be deployed to this address).
-
-//! ADMIN-CONFIGURED num_draws (added on top of the above)
-//! -----------------------------------------------------------
-//! * `create_selection_dispute` no longer accepts a caller-supplied
-//!   `num_draws` - a caller who could pick their own draw count could bias
-//!   Sybil economics or gas costs per dispute. It now always draws
-//!   `self.num_draws.read()` jurors, a value only the admin can set, via
-//!   the same timelocked `propose_set_num_draws` / `execute_set_num_draws`
-//!   pair used for every other scalar parameter. `propose_set_num_draws`
-//!   enforces a floor of `MIN_NUM_DRAWS` (10) so the Schelling game can
-//!   never be starved down to a trivially manipulable juror count.
+//! OPT-IN EVALUATION WITH A BOND (added on top of the above - Stage 1 is
+//! now opt-in, not admin/anyone-initiated)
+//! --------------------------------------------------------------------------
+//! * THE PROBLEM THIS CLOSES: `create_selection_dispute` used to accept an
+//!   arbitrary `candidate` address from an arbitrary caller. Nothing
+//!   stopped (or discouraged) someone from spinning up a dispute - with its
+//!   full juror draw, commit/reveal window, and VRF cost - for every one of
+//!   hundreds of thousands of passive addresses that never asked to be
+//!   evaluated and have no interest in Stage 3 conviction voting.
+//! * THE FIX: `create_selection_dispute` is gone. The only way to start a
+//!   Stage 1 dispute is now `request_evaluation`, which a candidate calls
+//!   on their OWN address (there is no more "nominate someone else"
+//!   surface) and which requires locking `EVALUATION_BOND_AMOUNT` (50 of
+//!   this contract's own token, the same token jurors stake) up front, plus
+//!   a non-empty `evidence` `ByteArray` describing why they should be
+//!   empowered. Both requirements are enforced at call time: a zero-length
+//!   `evidence` argument reverts immediately with `'EvidenceRequired'`
+//!   rather than opening a dispute that is doomed to fail for a reason
+//!   jurors never got to see.
+//! * ONE OPEN REQUEST AT A TIME: `has_active_dispute` / `active_dispute_for_candidate`
+//!   track, per candidate, whether they already have an unfinalized bonded
+//!   dispute in flight; a second `request_evaluation` call while one is
+//!   still open reverts with `'AlreadyUnderEvaluation'`. This is on top of
+//!   (not a replacement for) the bond itself - the bond is what makes
+//!   spamming *costly*, this mapping is what makes it *impossible* to
+//!   double-dip a single evaluation window.
+//! * SETTLEMENT, AT FINALIZATION, ONE-SHOT: `finalize_selection` now also
+//!   settles the bond, exactly once (`Dispute.bond_settled`), using the
+//!   same `final_score` it already computed for the Stage 2 mint decision:
+//!     - `final_score > 0`  -> the bond is refunded in full, via a plain
+//!       `erc20.transfer` back to the requester, in the SAME transaction
+//!       that mints their Stage 2 governance tokens. Success pays for
+//!       itself.
+//!     - `final_score <= 0` -> the bond is *not* transferred anywhere; it
+//!       is simply added to `Dispute.slash_pool`, the exact same pool
+//!       `claim_juror_reward` already pays out of pro-rata to coherent
+//!       jurors. This mirrors how a non-revealing juror's slashed stake
+//!       already funds that same pool (see "JUROR STAKE LOCKING" `slash_pool`
+//!       accounting) - no new token-custody path is introduced, the bond's
+//!       tokens simply arrived in the contract earlier (at `request_evaluation`
+//!       time, via `transfer_from`) and either leave (refund) or stay and
+//!       get relabeled (slash) at finalize time.
+//! * WHY NO SEPARATE "evidence" JUDGING: jurors still score purely via the
+//!   existing commit/reveal Schelling game - `evidence` is stored
+//!   (`dispute_evidence`) purely as on-chain context for jurors/observers to
+//!   read before voting, exactly like `FundingProposal.evidence` already
+//!   works for Stage 3. It has no on-chain scoring logic of its own beyond
+//!   the non-empty check at request time.
+//! * VIEWS: `get_evaluation_bond_amount`, `get_active_dispute_for_candidate`,
+//!   and `get_dispute_evidence` expose this accounting to UIs.
 
 #[starknet::interface]
 pub trait IStakeholderConviction<TContractState> {
@@ -255,9 +274,13 @@ pub trait IStakeholderConviction<TContractState> {
     // num_draws is no longer caller-supplied - see module header,
     // "ADMIN-CONFIGURED num_draws". It always uses the admin-set,
     // timelocked `num_draws` parameter (min 10).
-    fn create_selection_dispute(
-        ref self: TContractState, candidate: starknet::ContractAddress
-    ) -> u256;
+    //
+    // Opt-in only, bonded - see module header, "OPT-IN EVALUATION WITH A
+    // BOND". The caller IS the candidate; there is no more "nominate
+    // someone else" path. Requires locking `EVALUATION_BOND_AMOUNT` of
+    // this contract's own token (caller must `approve` first) and a
+    // non-empty `evidence` argument.
+    fn request_evaluation(ref self: TContractState, evidence: ByteArray) -> u256;
     fn commit_vote(ref self: TContractState, dispute_id: u256, commit_hash: felt252);
     fn reveal_vote(ref self: TContractState, dispute_id: u256, score: i8, salt: felt252);
     fn slash_non_revealer(ref self: TContractState, dispute_id: u256, juror: starknet::ContractAddress);
@@ -304,6 +327,20 @@ pub trait IStakeholderConviction<TContractState> {
     fn get_caller_reward_amount(self: @TContractState) -> u256;
     fn get_last_decay_at(self: @TContractState, user: starknet::ContractAddress) -> u64;
     fn is_protected_address(self: @TContractState, user: starknet::ContractAddress) -> bool;
+
+    // ---- juror stake locking (anti-evasion) - see module header,
+    // "JUROR STAKE LOCKING" ----
+    fn get_juror_locked_stake(self: @TContractState, juror: starknet::ContractAddress) -> u256;
+    fn get_juror_unlocked_stake(self: @TContractState, juror: starknet::ContractAddress) -> u256;
+    fn get_juror_open_dispute_count(self: @TContractState, juror: starknet::ContractAddress) -> u32;
+
+    // ---- opt-in evaluation bond - see module header, "OPT-IN EVALUATION
+    // WITH A BOND" ----
+    fn get_evaluation_bond_amount(self: @TContractState) -> u256;
+    fn get_active_dispute_for_candidate(
+        self: @TContractState, candidate: starknet::ContractAddress
+    ) -> u256;
+    fn get_dispute_evidence(self: @TContractState, dispute_id: u256) -> ByteArray;
 
     // ---- admin: every parameter below is timelocked - propose now,
     // execute only once TIMELOCK_DURATION (3 days) has elapsed ----
@@ -409,9 +446,10 @@ pub mod StakeholderConviction {
     // Standard IERC20 surface (transfer, transfer_from, approve, balance_of,
     // total_supply, allowance) - embedded straight into this contract's ABI.
     // NOTE: there is deliberately no embedded "mint" here. OZ's ERC20Impl
-    // never exposes one; the only mint path is the internal `_mint_capped`
-    // helper below, reachable only from the constructor and
-    // `_distribute_conviction_rewards`.
+    // never exposes one; the only mint paths are the internal
+    // `_mint_capped` helper below, reachable only from the constructor,
+    // `_distribute_conviction_rewards`, and the slash-keeper reward in
+    // `slash_non_revealer`.
     #[abi(embed_v0)]
     impl ERC20Impl = ERC20Component::ERC20Impl<ContractState>;
     #[abi(embed_v0)]
@@ -479,7 +517,7 @@ pub mod StakeholderConviction {
     const UPGRADE_TIMELOCK_DURATION: u64 = 604_800; // 7 days
 
     /// Floor enforced on the admin-configurable `num_draws` value used by
-    /// every `create_selection_dispute` call - see module header,
+    /// every `request_evaluation` call - see module header,
     /// "ADMIN-CONFIGURED num_draws".
     const MIN_NUM_DRAWS: u32 = 10;
     /// Constructor default for `num_draws`, itself admin-adjustable
@@ -511,6 +549,36 @@ pub mod StakeholderConviction {
 
     /// Max addresses per `batch_apply_decay` call - gas griefing protection.
     const MAX_BATCH_DECAY: u32 = 50;
+
+    /// Cap on how many disputes a single juror can be simultaneously
+    /// locked into (see module header, "JUROR STAKE LOCKING"). Past this,
+    /// a juror is skipped in the draw rather than seated, since locking is
+    /// additive across open disputes and an unbounded juror would end up
+    /// with all their stake permanently immobilized.
+    const MAX_CONCURRENT_JUROR_LOCKS: u32 = 15;
+
+    /// Cap on deterministic, VRF-free redraw attempts per draw slot when
+    /// the first-drawn juror is at their concurrency cap. Bounds worst-case
+    /// gas in `request_evaluation`; hitting this means essentially
+    /// every stake-weighted juror is maxed out, which should be treated as
+    /// an operational signal to raise MAX_CONCURRENT_JUROR_LOCKS or recruit
+    /// more jurors, not something to silently paper over.
+    const MAX_REDRAW_ATTEMPTS: u32 = 20;
+
+    /// Keeper reward (minted through `_mint_capped`, same cap as every
+    /// other mint) for calling `slash_non_revealer` on someone else. Keeps
+    /// locks from rotting indefinitely when a non-reveal isn't
+    /// self-interestedly punished by another juror's coherence reward.
+    /// Self-slashing (juror == caller) earns nothing.
+    const SLASH_KEEPER_REWARD: u256 = 500_000_000_000_000; // 0.0005 token
+
+    /// Bond a stakeholder must lock (in this contract's own token) to
+    /// request their own selection dispute via `request_evaluation` - see
+    /// module header, "OPT-IN EVALUATION WITH A BOND". Refunded in full on
+    /// a positive final score, alongside the Stage 2 governance-token
+    /// mint; otherwise added to the dispute's `slash_pool` (the same pool
+    /// `claim_juror_reward` pays coherent jurors from).
+    const EVALUATION_BOND_AMOUNT: u256 = 50_000_000_000_000_000_000; // 50 tokens
 
     // ---- timelocked-parameter keys: short strings packed into felt252,
     // one per scalar/address admin parameter, used as the key into
@@ -546,6 +614,11 @@ pub mod StakeholderConviction {
         pub total_coherent_weight: u32,
         pub slash_pool: u256,
         pub governance_tokens_minted: u256, // 0 until finalized (and may stay 0 if score <= 0)
+        // ---- opt-in evaluation bond - see module header, "OPT-IN
+        // EVALUATION WITH A BOND" ----
+        pub requester: ContractAddress, // who posted the bond (== candidate)
+        pub bond_amount: u256,          // EVALUATION_BOND_AMOUNT at request time
+        pub bond_settled: bool,         // true once finalize_selection has refunded/slashed it
     }
 
     /// A single non-transferable mint. Balance = sum of `_decayed_grant_amount`
@@ -683,6 +756,26 @@ pub mod StakeholderConviction {
         fenwick_tree: Map<u32, u256>,
         juror_stake: Map<ContractAddress, u256>,
 
+        // ---- juror stake locking (anti-evasion) - see module header,
+        // "JUROR STAKE LOCKING" ----
+        /// Sum of stake-at-draw-time snapshots across every dispute this
+        /// juror is currently drawn into and has not yet resolved (revealed
+        /// or been slashed). `unstake` must leave at least this much behind.
+        juror_locked_total: Map<ContractAddress, u256>,
+        /// Count of currently-open dispute obligations for this juror -
+        /// used only to enforce MAX_CONCURRENT_JUROR_LOCKS at draw time,
+        /// not for unstake accounting (juror_locked_total handles that).
+        juror_open_lock_count: Map<ContractAddress, u32>,
+        /// Per-(dispute, juror) snapshot amount, taken the first time a
+        /// juror is drawn into that dispute.
+        dispute_juror_locked_snapshot: Map<(u256, ContractAddress), u256>,
+        /// Per-(dispute, juror) one-shot release flag. Reveal and slash are
+        /// mutually exclusive and each individually single-fire (existing
+        /// asserts on dispute_revealed / dispute_slashed), so this flag is
+        /// enough to make `_release_dispute_lock` idempotent regardless of
+        /// which path fires first.
+        dispute_juror_lock_released: Map<(u256, ContractAddress), bool>,
+
         // ---- selection disputes ----
         dispute_count: u256,
         disputes: Map<u256, Dispute>,
@@ -695,6 +788,20 @@ pub mod StakeholderConviction {
         dispute_coherent: Map<(u256, ContractAddress), bool>,
         dispute_slashed: Map<(u256, ContractAddress), bool>,
         dispute_reward_claimed: Map<(u256, ContractAddress), bool>,
+
+        // ---- opt-in evaluation bond - see module header, "OPT-IN
+        // EVALUATION WITH A BOND" ----
+        /// Free-text (URI, hash, or inline text) evidence a candidate
+        /// submits with `request_evaluation`. Purely informational context
+        /// for jurors/observers, mirroring `FundingProposal.evidence`.
+        dispute_evidence: Map<u256, ByteArray>,
+        /// True while `candidate` has an unfinalized bonded dispute open -
+        /// blocks a second concurrent `request_evaluation` for the same
+        /// candidate.
+        has_active_dispute: Map<ContractAddress, bool>,
+        /// The dispute_id of `candidate`'s currently open bonded dispute,
+        /// if `has_active_dispute` is true. Purely a convenience view.
+        active_dispute_for_candidate: Map<ContractAddress, u256>,
 
         // ---- non-transferable governance tokens ----
         governance_next_grant: Map<ContractAddress, u32>,
@@ -755,13 +862,17 @@ pub mod StakeholderConviction {
         Staked: Staked,
         Unstaked: Unstaked,
         DisputeCreated: DisputeCreated,
+        EvaluationRequested: EvaluationRequested,
         JurorDrawn: JurorDrawn,
         VoteCommitted: VoteCommitted,
         VoteRevealed: VoteRevealed,
         JurorSlashed: JurorSlashed,
+        SlashKeeperRewarded: SlashKeeperRewarded,
         DisputeFinalized: DisputeFinalized,
         JurorRewardClaimed: JurorRewardClaimed,
         GovernanceTokensMinted: GovernanceTokensMinted,
+        BondRefunded: BondRefunded,
+        BondSlashed: BondSlashed,
         ConvictionCreated: ConvictionCreated,
         ConvictionReleased: ConvictionReleased,
         SupportAdded: SupportAdded,
@@ -811,6 +922,15 @@ pub mod StakeholderConviction {
     }
 
     #[derive(Drop, starknet::Event)]
+    struct EvaluationRequested {
+        #[key]
+        dispute_id: u256,
+        #[key]
+        candidate: ContractAddress,
+        bond_amount: u256,
+    }
+
+    #[derive(Drop, starknet::Event)]
     struct JurorDrawn {
         #[key]
         dispute_id: u256,
@@ -846,6 +966,17 @@ pub mod StakeholderConviction {
     }
 
     #[derive(Drop, starknet::Event)]
+    struct SlashKeeperRewarded {
+        #[key]
+        caller: ContractAddress,
+        #[key]
+        juror: ContractAddress,
+        #[key]
+        dispute_id: u256,
+        reward: u256,
+    }
+
+    #[derive(Drop, starknet::Event)]
     struct DisputeFinalized {
         #[key]
         dispute_id: u256,
@@ -871,6 +1002,24 @@ pub mod StakeholderConviction {
         candidate: ContractAddress,
         amount: u256,
         final_score: i64,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct BondRefunded {
+        #[key]
+        dispute_id: u256,
+        #[key]
+        requester: ContractAddress,
+        amount: u256,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct BondSlashed {
+        #[key]
+        dispute_id: u256,
+        #[key]
+        requester: ContractAddress,
+        amount: u256,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -1134,6 +1283,12 @@ pub mod StakeholderConviction {
             self.reentrancyguard.end();
         }
 
+        /// See module header, "JUROR STAKE LOCKING": a juror can never
+        /// withdraw below `juror_locked_total`, the sum of stake-at-draw-time
+        /// snapshots across every open dispute they've been drawn into and
+        /// not yet resolved (by reveal or by being slashed). This is what
+        /// closes the "unstake immediately after being drawn, then ignore
+        /// commit/reveal" evasion.
         fn unstake(ref self: ContractState, amount: u256) {
             self.reentrancyguard.start();
             assert(amount > 0, 'ZeroAmount');
@@ -1141,6 +1296,9 @@ pub mod StakeholderConviction {
 
             let current = self.juror_stake.entry(caller).read();
             assert(current >= amount, 'InsufficientStake');
+
+            let locked = self.juror_locked_total.entry(caller).read();
+            assert(current - amount >= locked, 'InsufficientUnlockedStake');
 
             let index = self.juror_index.entry(caller).read();
             assert(index != 0, 'NotRegistered');
@@ -1160,15 +1318,29 @@ pub mod StakeholderConviction {
                     // STAKEHOLDER SELECTION (Kleros dispute)
         // ----------------------------------------------------------
 
-        fn create_selection_dispute(
-            ref self: ContractState, candidate: ContractAddress
-        ) -> u256 {
+        /// Opt-in, bonded - see module header, "OPT-IN EVALUATION WITH A
+        /// BOND". Replaces the old caller-supplied-candidate
+        /// `create_selection_dispute`: the caller IS the candidate, must
+        /// lock `EVALUATION_BOND_AMOUNT` of this contract's own token
+        /// (`approve` this contract first), and must supply non-empty
+        /// `evidence`. Reverts if the candidate already has an unfinalized
+        /// bonded dispute open.
+        fn request_evaluation(ref self: ContractState, evidence: ByteArray) -> u256 {
             self.reentrancyguard.start();
-            assert(candidate.is_non_zero(), 'ZeroAddress');
+            assert(evidence.len() > 0, 'EvidenceRequired');
+
+            let candidate = get_caller_address();
+            assert(!self.has_active_dispute.entry(candidate).read(), 'AlreadyUnderEvaluation');
+
+            // Bond is this contract's own token, exactly like juror stake -
+            // pulled into the contract now, refunded or relabeled as slash
+            // pool at finalize_selection time. See module header.
+            let bond_amount = EVALUATION_BOND_AMOUNT;
+            let ok = self.erc20.transfer_from(candidate, get_contract_address(), bond_amount);
+            assert(ok, 'TransferFailed');
 
             // Admin-configured, timelocked, floor MIN_NUM_DRAWS (10) - see
-            // module header, "ADMIN-CONFIGURED num_draws". No longer
-            // caller-supplied.
+            // module header, "ADMIN-CONFIGURED num_draws".
             let num_draws = self.num_draws.read();
 
             // Computed once, reused for every draw - see module CAVEATS.
@@ -1195,9 +1367,17 @@ pub mod StakeholderConviction {
                 total_coherent_weight: 0,
                 slash_pool: 0,
                 governance_tokens_minted: 0,
+                requester: candidate,
+                bond_amount,
+                bond_settled: false,
             };
             self.disputes.entry(dispute_id).write(dispute);
+            self.dispute_evidence.entry(dispute_id).write(evidence);
+            self.has_active_dispute.entry(candidate).write(true);
+            self.active_dispute_for_candidate.entry(candidate).write(dispute_id);
+
             self.emit(DisputeCreated { dispute_id, candidate, num_draws });
+            self.emit(EvaluationRequested { dispute_id, candidate, bond_amount });
 
             // Exactly one Cartridge VRF value per dispute. Caller MUST
             // prefix this call, in the same multicall, with:
@@ -1213,13 +1393,39 @@ pub mod StakeholderConviction {
                     break;
                 }
 
-                let rand_felt = self._derive_draw_random(base_seed, dispute_id, i);
-                let rand_u256: u256 = rand_felt.into();
-                let target = rand_u256 % total_weight;
+                // ---- draw, with a deterministic redraw if the first pick
+                // is not yet drawn in THIS dispute AND is already at their
+                // concurrent-lock cap - see module header, "JUROR STAKE
+                // LOCKING". A juror already drawn in this dispute is always
+                // accepted (no new lock created, just more weight). ----
+                let mut rand_felt = self._derive_draw_random(base_seed, dispute_id, i);
+                let mut attempt: u32 = 0;
+                let juror = loop {
+                    let rand_u256: u256 = rand_felt.into();
+                    let target = rand_u256 % total_weight;
+                    let index = self._fenwick_find(target);
+                    let candidate_juror = self.index_juror.entry(index).read();
+                    assert(candidate_juror.is_non_zero(), 'DrawFailed');
 
-                let index = self._fenwick_find(target);
-                let juror = self.index_juror.entry(index).read();
-                assert(juror.is_non_zero(), 'DrawFailed');
+                    let already_drawn_here = self
+                        .dispute_juror_draws
+                        .entry((dispute_id, candidate_juror))
+                        .read() > 0;
+                    let open_locks = self.juror_open_lock_count.entry(candidate_juror).read();
+
+                    if already_drawn_here || open_locks < MAX_CONCURRENT_JUROR_LOCKS {
+                        break candidate_juror;
+                    }
+
+                    // Deterministic reseed, no extra VRF call - stays
+                    // reproducible from base_seed alone.
+                    attempt += 1;
+                    assert(attempt < MAX_REDRAW_ATTEMPTS, 'NoEligibleJurors');
+                    let mut redraw_input: Array<felt252> = ArrayTrait::new();
+                    redraw_input.append(rand_felt);
+                    redraw_input.append(attempt.into());
+                    rand_felt = poseidon_hash_span(redraw_input.span());
+                };
 
                 let prior_draws = self.dispute_juror_draws.entry((dispute_id, juror)).read();
                 self.dispute_juror_draws.entry((dispute_id, juror)).write(prior_draws + 1);
@@ -1227,6 +1433,19 @@ pub mod StakeholderConviction {
                 if prior_draws == 0 {
                     self.dispute_juror_list.entry((dispute_id, unique_juror_count)).write(juror);
                     unique_juror_count += 1;
+
+                    // NEW: lock this juror's current stake as collateral
+                    // for this dispute - see module header, "JUROR STAKE
+                    // LOCKING".
+                    let stake_at_draw = self.juror_stake.entry(juror).read();
+                    self
+                        .dispute_juror_locked_snapshot
+                        .entry((dispute_id, juror))
+                        .write(stake_at_draw);
+                    let prior_locked = self.juror_locked_total.entry(juror).read();
+                    self.juror_locked_total.entry(juror).write(prior_locked + stake_at_draw);
+                    let prior_open = self.juror_open_lock_count.entry(juror).read();
+                    self.juror_open_lock_count.entry(juror).write(prior_open + 1);
                 }
 
                 self.emit(JurorDrawn { dispute_id, juror, total_draws_for_juror: prior_draws + 1 });
@@ -1283,10 +1502,16 @@ pub mod StakeholderConviction {
 
             self.dispute_score.entry((dispute_id, caller)).write(score);
             self.dispute_revealed.entry((dispute_id, caller)).write(true);
+            // NEW: honest path - release this dispute's lock immediately.
+            self._release_dispute_lock(dispute_id, caller);
 
             self.emit(VoteRevealed { dispute_id, juror: caller, score });
         }
 
+        /// See module header, "JUROR STAKE LOCKING". Now also: (a) releases
+        /// the juror's lock for this dispute (punished path), and (b) pays
+        /// a keeper reward to whoever calls this on someone else, so a
+        /// non-reveal doesn't rot unslashed and its lock doesn't stay stuck.
         fn slash_non_revealer(ref self: ContractState, dispute_id: u256, juror: ContractAddress) {
             self.reentrancyguard.start();
             let d = self.disputes.entry(dispute_id).read();
@@ -1312,7 +1537,24 @@ pub mod StakeholderConviction {
             }
 
             self.dispute_slashed.entry((dispute_id, juror)).write(true);
+            // NEW: punished path - release this dispute's lock.
+            self._release_dispute_lock(dispute_id, juror);
+
             self.emit(JurorSlashed { dispute_id, juror, amount: slash_amount });
+
+            // NEW: keeper reward, minted through the same capped path as
+            // every other mint. No reward for self-slashing.
+            let caller = get_caller_address();
+            if caller != juror && SLASH_KEEPER_REWARD > 0 {
+                self._mint_capped(caller, SLASH_KEEPER_REWARD);
+                self
+                    .emit(
+                        SlashKeeperRewarded {
+                            caller, juror, dispute_id, reward: SLASH_KEEPER_REWARD,
+                        },
+                    );
+            }
+
             self.reentrancyguard.end();
         }
 
@@ -1440,6 +1682,29 @@ pub mod StakeholderConviction {
                 d.governance_tokens_minted = mint_amount;
             }
 
+            // ---- bond settlement (opt-in evaluation) - see module header,
+            // "OPT-IN EVALUATION WITH A BOND". `bond_amount` is nonzero
+            // only for disputes opened through `request_evaluation`, so
+            // this is a no-op both ways for a zero bond. Positive score ->
+            // refund the requester in full, in the SAME transaction that
+            // mints their Stage 2 governance tokens. Zero-or-negative ->
+            // no transfer at all: the bond's tokens are already sitting in
+            // this contract (pulled in at request_evaluation time), so
+            // "slashing" it is just relabeling it into `slash_pool`,
+            // exactly like a non-revealing juror's slashed stake already
+            // does for that same pool.
+            let bond_amount = d.bond_amount;
+            let requester = d.requester;
+            let refund_bond = bond_amount > 0 && final_score > 0;
+            let slash_bond = bond_amount > 0 && final_score <= 0;
+            if slash_bond {
+                d.slash_pool += bond_amount;
+            }
+            d.bond_settled = true;
+            if requester.is_non_zero() {
+                self.has_active_dispute.entry(requester).write(false);
+            }
+
             self.disputes.entry(dispute_id).write(d);
             self.emit(DisputeFinalized { dispute_id, candidate: d.candidate, final_score });
             if mint_amount > 0 {
@@ -1450,6 +1715,15 @@ pub mod StakeholderConviction {
                         },
                     );
             }
+
+            if refund_bond {
+                let ok = self.erc20.transfer(requester, bond_amount);
+                assert(ok, 'TransferFailed');
+                self.emit(BondRefunded { dispute_id, requester, amount: bond_amount });
+            } else if slash_bond {
+                self.emit(BondSlashed { dispute_id, requester, amount: bond_amount });
+            }
+
             self.reentrancyguard.end();
         }
 
@@ -1470,8 +1744,9 @@ pub mod StakeholderConviction {
             if amount > 0 {
                 // Paid out of the slash pool, which is already this
                 // contract's own token (jurors staked and got slashed in
-                // it) - a plain transfer, not a mint, so it never touches
-                // MAX_SUPPLY.
+                // it, and non-refunded evaluation bonds are added here too
+                // - see "bond settlement" above) - a plain transfer, not a
+                // mint, so it never touches MAX_SUPPLY.
                 let ok = self.erc20.transfer(caller, amount);
                 assert(ok, 'TransferFailed');
             }
@@ -1773,6 +2048,44 @@ pub mod StakeholderConviction {
 
         fn is_protected_address(self: @ContractState, user: ContractAddress) -> bool {
             self.is_protected.entry(user).read()
+        }
+
+        // ----------------------------------------------------------
+              // JUROR STAKE LOCKING (anti-evasion) VIEWS
+        // ----------------------------------------------------------
+
+        fn get_juror_locked_stake(self: @ContractState, juror: ContractAddress) -> u256 {
+            self.juror_locked_total.entry(juror).read()
+        }
+
+        fn get_juror_unlocked_stake(self: @ContractState, juror: ContractAddress) -> u256 {
+            let total = self.juror_stake.entry(juror).read();
+            let locked = self.juror_locked_total.entry(juror).read();
+            if locked >= total {
+                0
+            } else {
+                total - locked
+            }
+        }
+
+        fn get_juror_open_dispute_count(self: @ContractState, juror: ContractAddress) -> u32 {
+            self.juror_open_lock_count.entry(juror).read()
+        }
+
+        // ----------------------------------------------------------
+              // OPT-IN EVALUATION BOND VIEWS
+        // ----------------------------------------------------------
+
+        fn get_evaluation_bond_amount(self: @ContractState) -> u256 {
+            EVALUATION_BOND_AMOUNT
+        }
+
+        fn get_active_dispute_for_candidate(self: @ContractState, candidate: ContractAddress) -> u256 {
+            self.active_dispute_for_candidate.entry(candidate).read()
+        }
+
+        fn get_dispute_evidence(self: @ContractState, dispute_id: u256) -> ByteArray {
+            self.dispute_evidence.entry(dispute_id).read()
         }
 
         // ----------------------------------------------------------
@@ -2118,9 +2431,10 @@ pub mod StakeholderConviction {
     #[generate_trait]
     impl InternalImpl of InternalTrait {
         // ---- this contract's own capped ERC20 mint - the ONLY path that
-        // can ever increase total_supply(). Called from exactly two places
-        // in this whole file: the constructor, and
-        // _distribute_conviction_rewards. There is no other mint function,
+        // can ever increase total_supply(). Called from exactly three
+        // places in this whole file: the constructor,
+        // _distribute_conviction_rewards, and the slash-keeper reward
+        // inside slash_non_revealer. There is no other mint function,
         // public or admin-gated, anywhere in this contract. ----
 
         fn _mint_capped(ref self: ContractState, to: ContractAddress, amount: u256) {
@@ -2523,6 +2837,37 @@ pub mod StakeholderConviction {
                     }
                 }
             }
+        }
+
+        // ---- juror stake locking (anti-evasion) ----
+        // See module header, "JUROR STAKE LOCKING".
+
+        /// Releases a juror's lock for one dispute, exactly once, from
+        /// whichever path fires first (honest reveal or punished slash).
+        /// No-ops if already released, so callers (reveal_vote and
+        /// slash_non_revealer) don't need to coordinate which path runs
+        /// first - they're mutually exclusive by the existing
+        /// dispute_revealed / dispute_slashed asserts anyway, but the flag
+        /// makes this helper itself safe to call from either without extra
+        /// bookkeeping at the call sites.
+        fn _release_dispute_lock(ref self: ContractState, dispute_id: u256, juror: ContractAddress) {
+            if self.dispute_juror_lock_released.entry((dispute_id, juror)).read() {
+                return;
+            }
+            let snapshot = self.dispute_juror_locked_snapshot.entry((dispute_id, juror)).read();
+            let total = self.juror_locked_total.entry(juror).read();
+            // snapshot <= total always holds here: it was added exactly
+            // once (in request_evaluation, on first draw for this
+            // dispute) and this is the only release path, guarded by the
+            // flag above.
+            self.juror_locked_total.entry(juror).write(total - snapshot);
+
+            let open = self.juror_open_lock_count.entry(juror).read();
+            if open > 0 {
+                self.juror_open_lock_count.entry(juror).write(open - 1);
+            }
+
+            self.dispute_juror_lock_released.entry((dispute_id, juror)).write(true);
         }
 
         // ---- generic 3-day timelock engine for scalar/address admin
