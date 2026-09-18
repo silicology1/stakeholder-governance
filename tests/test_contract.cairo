@@ -48,6 +48,11 @@ const REVEAL_PHASE_TS: u64 = T0 + 86_401;   // after 1-day commit deadline
 const FINALIZE_TS: u64 = T0 + 172_801;      // after 1-day reveal deadline
 const TIMELOCK_DURATION: u64 = 259_200;     // 3-day admin timelock
 
+// Monthly inflation / burn-recycling budget.
+const MONTH_SECONDS: u64 = 2_592_000; // fixed 30-day month
+const BUDGET_BPS_DENOM: u256 = 10_000;
+const MONTHS_PER_YEAR: u256 = 12;
+
 // ////////////////////////////////////////////////////////////////
                             // TEST FIXTURE
 // ////////////////////////////////////////////////////////////////
@@ -460,4 +465,133 @@ fn test_evaluation_bond_timelocked_change_takes_effect() {
     gov.execute_set_evaluation_bond_amount();
 
     assert(gov.get_evaluation_bond_amount() == 70 * ONE, 'bond updates after timelock');
+}
+
+// ////////////////////////////////////////////////////////////////
+        // MONTHLY INFLATION / BURN-RECYCLING BUDGET
+// ////////////////////////////////////////////////////////////////
+
+#[test]
+fn test_initial_month_budget_is_inflation_share() {
+    let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
+    let gov = gov_disp(contract);
+
+    // Month 0 budget = 10M tokens * 5% / 12 = 10M / 240 tokens, recycle 0.
+    let expected = 10_000_000 * ONE / 240;
+    assert(gov.get_current_month() == 0, 'month should be 0');
+    assert(gov.get_month_budget(0) == expected, 'month0 budget mismatch');
+    assert(gov.get_remaining_month_budget() == expected, 'nothing minted yet');
+    assert(gov.get_month_budget_minted(0) == 0, 'no mints yet');
+    assert(gov.get_month_burned(0) == 0, 'no burns yet');
+    assert(gov.get_inflation_rate_bps() == 500, 'default rate should be 5%');
+}
+
+#[test]
+fn test_reward_mints_consume_monthly_budget() {
+    let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
+    evaluate(contract, 5);
+
+    let gov = gov_disp(contract);
+    let before = gov.get_remaining_month_budget();
+
+    let proposal_id = create_proposal(contract, funding_wallet(), "proposal evidence");
+    start_cheat_caller_address(contract, candidate());
+    let conviction_id = gov.create_conviction(1, 1_000 * ONE);
+
+    start_cheat_block_timestamp(contract, FINALIZE_TS + 1000 * 3_600);
+    gov.vote_with_conviction(proposal_id, conviction_id, 5);
+    gov.execute_proposal(proposal_id);
+
+    // The 1000h vote timestamp pushes execution past the month boundary, so
+    // the reward is counted against whatever month is current at mint time.
+    let reward = 5 * REWARD_MULT; // score 5 * full multiplier = 500 tokens
+    let month = gov.get_current_month();
+    assert(gov.get_remaining_month_budget() == before - reward, 'budget should shrink');
+    assert(gov.get_month_budget_minted(month) == reward, 'minted mismatch');
+}
+
+#[test]
+#[should_panic(expected: ('BudgetExceeded',))]
+fn test_reward_exceeding_monthly_budget_reverts() {
+    let contract = deploy(THRESHOLD, 10_000 * ONE, MINI_REWARD_MULT);
+    evaluate(contract, 5);
+
+    let gov = gov_disp(contract);
+    let proposal_id = create_proposal(contract, funding_wallet(), "proposal evidence");
+
+    start_cheat_caller_address(contract, candidate());
+    let conviction_id = gov.create_conviction(1, 1_000 * ONE);
+
+    start_cheat_block_timestamp(contract, FINALIZE_TS + 1000 * 3_600);
+    gov.vote_with_conviction(proposal_id, conviction_id, 5);
+    // 5 * 10,000 tokens = 50,000 > 10M/240 = ~41,667 token budget.
+    gov.execute_proposal(proposal_id);
+}
+
+#[test]
+fn test_burned_tokens_recycle_into_next_month_budget() {
+    let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
+    let gov = gov_disp(contract);
+    let tok = tok_disp(contract);
+
+    // Whale (initial recipient) burns 1,000 tokens during month 0.
+    start_cheat_caller_address(contract, whale());
+    gov.burn(1_000 * ONE);
+    assert(gov.get_month_burned(0) == 1_000 * ONE, 'burn should be tracked');
+
+    // Roll into month 1: budget = inflation share + last month's burns.
+    start_cheat_block_timestamp(contract, MONTH_SECONDS + 1);
+    gov.burn(1); // triggers month rollover
+
+    assert(gov.get_current_month() == 1, 'month should roll');
+    let supply_after_burn = tok.total_supply();
+    let inflation_part = supply_after_burn * 500 / (BUDGET_BPS_DENOM * MONTHS_PER_YEAR);
+    assert(gov.get_month_budget(1) == inflation_part + 1_000 * ONE, 'recycle mismatch');
+}
+
+#[test]
+fn test_unused_budget_is_not_recycled() {
+    let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
+    let gov = gov_disp(contract);
+
+    // No usage at all in month 0: leftover == full budget.
+    start_cheat_block_timestamp(contract, MONTH_SECONDS + 1);
+    start_cheat_caller_address(contract, whale());
+    gov.burn(1); // triggers month rollover
+
+    assert(gov.get_current_month() == 1, 'month should roll');
+    // Budget is written off (burned), never recycled, so month 1 equals the
+    // same pure inflation share instead of budget0 + leftover.
+    assert(gov.get_month_budget(1) == gov.get_month_budget(0), 'leftover should be burned');
+    assert(gov.get_remaining_month_budget() == gov.get_month_budget(1) - 0, 'fresh budget');
+    assert(gov.get_month_burned(0) == 0, 'leftover is not a recorded burn');
+}
+
+#[test]
+fn test_inflation_rate_timelocked_change() {
+    let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
+    let gov = gov_disp(contract);
+
+    start_cheat_block_timestamp(contract, T0);
+    start_cheat_caller_address(contract, admin());
+    gov.propose_set_inflation_rate_bps(300);
+
+    let pending = gov.get_pending_change('INFLATION_RATE');
+    assert(pending.exists, 'change should be pending');
+    assert(pending.new_value == 300, 'pending value mismatch');
+
+    start_cheat_block_timestamp(contract, T0 + TIMELOCK_DURATION + 1);
+    gov.execute_set_inflation_rate_bps();
+
+    assert(gov.get_inflation_rate_bps() == 300, 'rate updated');
+}
+
+#[test]
+#[should_panic(expected: ('TooHigh',))]
+fn test_inflation_rate_above_max_reverts() {
+    let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
+    let gov = gov_disp(contract);
+
+    start_cheat_caller_address(contract, admin());
+    gov.propose_set_inflation_rate_bps(501);
 }

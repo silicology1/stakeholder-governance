@@ -63,12 +63,26 @@
 //!   The deposit is refunded on positive final score, slashed to the
 //!   slash_pool on zero or negative.
 //!
+//!   MONTHLY INFLATION + BURN RECYCLING BUDGET
+//!   ---------------------------------------------
+//!   All ERC20 reward mints (proposal score rewards, slash-keeper reward,
+//!   decay-caller reward) are capped by a per-month budget:
+//!       budget_month[N] = inflation_part + recycle_part
+//!     - inflation_part = total_supply() * inflation_rate_bps / (10000 * 12),
+//!       i.e. at most 5%/12 of current supply per fixed 30-day month
+//!       (MONTH_SECONDS). It is 0 once supply reaches MAX_SUPPLY.
+//!     - recycle_part   = total ERC20 tokens actually burned during the
+//!       previous month (decay burns + explicit `burn` calls).
+//!   A month's unutilized budget is burned (written off) at rollover; it is
+//!   NOT recycled. Rewards that exceed the remaining budget revert.
+//!
 //!   SUPPLY: fixed cap, one-time initial mint
 //!   -------------------------------------------
 //!     - `MAX_SUPPLY`     = 50,000,000 tokens (18 decimals).
 //!     - `INITIAL_SUPPLY` = 10,000,000 tokens (18 decimals), minted in
 //!       the constructor.
-//!   Score-based reward mints go through `_mint_capped` against the cap.
+//!   Reward mints go through `_mint_from_budget` (monthly cap) then
+//!   `_mint_capped` against MAX_SUPPLY.
 //!
 //!   ADMIN TIMELOCK
 //!   ----------------
@@ -108,7 +122,8 @@
 //! * `reward_multiplier` (for scores 4-5) and `mini_reward_multiplier`
 //!   (for scores 1-3) are admin-timelocked.
 //! * reward = final_score * multiplier, minted to funding_wallet on
-//!   positive final score.
+//!   positive final score, subject to the monthly inflation budget
+//!   (see "MONTHLY INFLATION + BURN RECYCLING BUDGET" above).
 //!
 //! CODE ORGANIZATION
 //! -----------------
@@ -170,6 +185,15 @@ pub trait IStakeholderConviction<TContractState> {
     fn token_remaining_mintable(self: @TContractState) -> u256;
     fn burn(ref self: TContractState, amount: u256);
 
+    // ---- monthly inflation / burn-recycling budget ----
+    fn get_current_month(self: @TContractState) -> u64;
+    fn get_month_start(self: @TContractState) -> u64;
+    fn get_month_budget(self: @TContractState, month: u64) -> u256;
+    fn get_month_budget_minted(self: @TContractState, month: u64) -> u256;
+    fn get_month_burned(self: @TContractState, month: u64) -> u256;
+    fn get_remaining_month_budget(self: @TContractState) -> u256;
+    fn get_inflation_rate_bps(self: @TContractState) -> u16;
+
     // ---- ERC20 balance decay ----
     fn apply_decay(ref self: TContractState, user: starknet::ContractAddress);
     fn batch_apply_decay(ref self: TContractState, users: Array<starknet::ContractAddress>);
@@ -229,6 +253,8 @@ pub trait IStakeholderConviction<TContractState> {
     fn propose_set_num_draws(ref self: TContractState, num_draws: u32);
     fn execute_set_num_draws(ref self: TContractState);
     fn get_num_draws(self: @TContractState) -> u32;
+    fn propose_set_inflation_rate_bps(ref self: TContractState, bps: u16);
+    fn execute_set_inflation_rate_bps(ref self: TContractState);
     fn propose_set_protected_address(
         ref self: TContractState,
         target: starknet::ContractAddress,
@@ -437,6 +463,14 @@ pub mod StakeholderConviction {
         // ---- admin roster ----
         pending_admin_changes: Map<ContractAddress, PendingAdminChange>,
         admin_count: u32,
+
+        // ---- monthly inflation / burn-recycling budget ----
+        inflation_rate_bps: u16,
+        month_start: u64,
+        month_index: u64,
+        month_budget: Map<u64, u256>,
+        month_minted: Map<u64, u256>,
+        month_burned: Map<u64, u256>,
     }
 
     // //////////////////////////////////////////////////////////////
@@ -484,6 +518,9 @@ pub mod StakeholderConviction {
         ProposalDepositSlashed: ProposalDepositSlashed,
         DecayApplied: DecayApplied,
         DecayCallerRewarded: DecayCallerRewarded,
+        MonthlyBudgetSet: MonthlyBudgetSet,
+        MonthlyBudgetBurned: MonthlyBudgetBurned,
+        BudgetRewardMinted: BudgetRewardMinted,
         ChangeProposed: ChangeProposed,
         ChangeExecuted: ChangeExecuted,
         ProtectedAddressProposed: ProtectedAddressProposed,
@@ -553,8 +590,23 @@ pub mod StakeholderConviction {
 
         self.admin_count.write(1);
 
+        // Monthly inflation / burn-recycling budget defaults
+        self.inflation_rate_bps.write(DEFAULT_INFLATION_RATE_BPS);
+        self.month_start.write(get_block_timestamp());
+        self.month_index.write(0);
+
         // One-time initial mint
         self._mint_capped(initial_recipient, INITIAL_SUPPLY);
+
+        // Month-0 budget = inflation share only (no prior-month burns yet).
+        let month0_budget = self._compute_month_budget(0);
+        self.month_budget.entry(0).write(month0_budget);
+        self
+            .emit(
+                MonthlyBudgetSet {
+                    month: 0, budget: month0_budget, inflation_part: month0_budget, recycle_part: 0,
+                },
+            );
     }
 
     // //////////////////////////////////////////////////////////////
@@ -815,7 +867,7 @@ pub mod StakeholderConviction {
 
             let caller = get_caller_address();
             if caller != juror && SLASH_KEEPER_REWARD > 0 {
-                self._mint_capped(caller, SLASH_KEEPER_REWARD);
+                self._mint_from_budget(caller, SLASH_KEEPER_REWARD);
                 self
                     .emit(
                         SlashKeeperRewarded {
@@ -1256,7 +1308,7 @@ pub mod StakeholderConviction {
                     score_u256 * rm
                 };
                 if reward > 0 {
-                    self._mint_capped(funding_wallet, reward);
+                    self._mint_from_budget(funding_wallet, reward);
                     self
                         .emit(
                             ScoreRewardReleased {
@@ -1306,6 +1358,46 @@ pub mod StakeholderConviction {
         fn burn(ref self: ContractState, amount: u256) {
             assert(amount > 0, 'ZeroAmount');
             self.erc20.burn(get_caller_address(), amount);
+            self._track_burn(amount);
+        }
+
+        // ----------------------------------------------------------
+                // MONTHLY INFLATION / BURN-RECYCLING BUDGET
+        // ----------------------------------------------------------
+
+        fn get_current_month(self: @ContractState) -> u64 {
+            self.month_index.read()
+        }
+
+        fn get_month_start(self: @ContractState) -> u64 {
+            self.month_start.read()
+        }
+
+        fn get_month_budget(self: @ContractState, month: u64) -> u256 {
+            self.month_budget.entry(month).read()
+        }
+
+        fn get_month_budget_minted(self: @ContractState, month: u64) -> u256 {
+            self.month_minted.entry(month).read()
+        }
+
+        fn get_month_burned(self: @ContractState, month: u64) -> u256 {
+            self.month_burned.entry(month).read()
+        }
+
+        fn get_remaining_month_budget(self: @ContractState) -> u256 {
+            let month = self.month_index.read();
+            let budget = self.month_budget.entry(month).read();
+            let minted = self.month_minted.entry(month).read();
+            if minted >= budget {
+                0
+            } else {
+                budget - minted
+            }
+        }
+
+        fn get_inflation_rate_bps(self: @ContractState) -> u16 {
+            self.inflation_rate_bps.read()
         }
 
         // ----------------------------------------------------------
@@ -1548,6 +1640,18 @@ pub mod StakeholderConviction {
             self.num_draws.read()
         }
 
+        fn propose_set_inflation_rate_bps(ref self: ContractState, bps: u16) {
+            assert(bps <= MAX_INFLATION_BPS, 'TooHigh');
+            self._propose_change(PARAM_INFLATION_RATE_BPS, bps.into());
+        }
+
+        fn execute_set_inflation_rate_bps(ref self: ContractState) {
+            let value = self._execute_change(PARAM_INFLATION_RATE_BPS);
+            let value_u64: u64 = value.try_into().unwrap();
+            let value_u16: u16 = value_u64.try_into().unwrap();
+            self.inflation_rate_bps.write(value_u16);
+        }
+
         fn propose_set_protected_address(
             ref self: ContractState, target: ContractAddress, protected: bool,
         ) {
@@ -1750,6 +1854,96 @@ pub mod StakeholderConviction {
             let current_supply = self.erc20.total_supply();
             assert(current_supply + amount <= MAX_SUPPLY, 'SupplyCapExceeded');
             self.erc20.mint(to, amount);
+        }
+
+        // ---- monthly inflation / burn-recycling budget ----
+
+        fn _compute_month_budget(self: @ContractState, month: u64) -> u256 {
+            let recycle = if month == 0 {
+                0
+            } else {
+                self.month_burned.entry(month - 1).read()
+            };
+
+            let supply = self.erc20.total_supply();
+            if supply >= MAX_SUPPLY {
+                return recycle;
+            }
+
+            let rate_bps: u256 = self.inflation_rate_bps.read().into();
+            let inflation = supply * rate_bps / (DECAY_BPS_DENOM * MONTHS_PER_YEAR.into());
+            let headroom = MAX_SUPPLY - supply;
+            let inflation_part = if inflation > headroom { headroom } else { inflation };
+            inflation_part + recycle
+        }
+
+        fn _ensure_current_month(ref self: ContractState) {
+            let now = get_block_timestamp();
+            let mut start = self.month_start.read();
+            if now < start + MONTH_SECONDS {
+                return;
+            }
+
+            let elapsed = (now - start) / MONTH_SECONDS;
+            assert(elapsed <= MAX_ROLLOVER_MONTHS, 'TooManyMonthsBehind');
+
+            let mut idx = self.month_index.read();
+            let mut i: u64 = 0;
+            loop {
+                if i >= elapsed {
+                    break;
+                }
+
+                // Settle the just-closed month: burn any unutilized budget.
+                let budget = self.month_budget.entry(idx).read();
+                let minted = self.month_minted.entry(idx).read();
+                if minted < budget {
+                    let leftover = budget - minted;
+                    self.emit(MonthlyBudgetBurned { month: idx, amount: leftover });
+                }
+
+                // Open the next month with a fresh budget.
+                idx += 1;
+                start += MONTH_SECONDS;
+                let new_budget = self._compute_month_budget(idx);
+                let recycle = self.month_burned.entry(idx - 1).read();
+                let inflation_part = new_budget - recycle;
+                self.month_budget.entry(idx).write(new_budget);
+                self
+                    .emit(
+                        MonthlyBudgetSet {
+                            month: idx, budget: new_budget, inflation_part, recycle_part: recycle,
+                        },
+                    );
+
+                i += 1;
+            };
+
+            self.month_index.write(idx);
+            self.month_start.write(start);
+        }
+
+        fn _mint_from_budget(ref self: ContractState, to: ContractAddress, amount: u256) {
+            assert(amount > 0, 'ZeroAmount');
+            self._ensure_current_month();
+
+            let month = self.month_index.read();
+            let budget = self.month_budget.entry(month).read();
+            let minted = self.month_minted.entry(month).read();
+            assert(minted + amount <= budget, 'BudgetExceeded');
+
+            self._mint_capped(to, amount);
+            self.month_minted.entry(month).write(minted + amount);
+            self.emit(BudgetRewardMinted { month, recipient: to, amount });
+        }
+
+        fn _track_burn(ref self: ContractState, amount: u256) {
+            assert(amount > 0, 'ZeroAmount');
+            self._ensure_current_month();
+
+            let month = self.month_index.read();
+            let burned = self.month_burned.entry(month).read();
+            self.month_burned.entry(month).write(burned + amount);
         }
 
         // ---- juror slot registry ----
@@ -2009,6 +2203,7 @@ pub mod StakeholderConviction {
 
             if burn_amount > 0 {
                 self.erc20.burn(user, burn_amount);
+                self._track_burn(burn_amount);
                 self.emit(DecayApplied { user, amount: burn_amount, caller });
             }
 
@@ -2018,7 +2213,7 @@ pub mod StakeholderConviction {
                     self.last_caller_reward_at.entry(caller).write(now);
                     let reward = self.caller_reward_amount.read();
                     if reward > 0 {
-                        self._mint_capped(caller, reward);
+                        self._mint_from_budget(caller, reward);
                         self.emit(DecayCallerRewarded { caller, user, reward });
                     }
                 }

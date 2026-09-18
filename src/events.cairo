@@ -232,6 +232,31 @@ pub struct DecayCallerRewarded {
 }
 
 #[derive(Drop, starknet::Event)]
+pub struct MonthlyBudgetSet {
+    #[key]
+    pub month: u64,
+    pub budget: u256,
+    pub inflation_part: u256,
+    pub recycle_part: u256,
+}
+
+#[derive(Drop, starknet::Event)]
+pub struct MonthlyBudgetBurned {
+    #[key]
+    pub month: u64,
+    pub amount: u256,
+}
+
+#[derive(Drop, starknet::Event)]
+pub struct BudgetRewardMinted {
+    #[key]
+    pub month: u64,
+    #[key]
+    pub recipient: ContractAddress,
+    pub amount: u256,
+}
+
+#[derive(Drop, starknet::Event)]
 pub struct ChangeProposed {
     #[key]
     pub param_key: felt252,
