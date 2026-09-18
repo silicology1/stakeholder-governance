@@ -35,7 +35,7 @@ const ONE: u256 = 1_000_000_000_000_000_000;
 // Constructor defaults used by most tests.
 const BOND: u256 = 50 * ONE;
 const DEPOSIT: u256 = 10 * ONE;
-const THRESHOLD: u256 = 1 * ONE;
+const THRESHOLD: u256 = 1_000_000_000;   // cleared by one meaningful conviction
 const REWARD_MULT: u256 = 100 * ONE;        // used for scores 4-5
 const MINI_REWARD_MULT: u256 = 10 * ONE;    // used for scores 1-3
 
@@ -242,11 +242,16 @@ fn test_positive_score_rewards_and_refunds_deposit() {
 
     start_cheat_caller_address(contract, candidate());
     let conviction_id = gov.create_conviction(1, 1_000 * ONE);
+
+    // Conviction matures for 1000 hours before voting: weight at vote time
+    // (frozen in the score histogram) and at execution is
+    //   level(1) * sqrt(1_000 tokens * 1000 h) = sqrt(1e24) = 1e12 wei.
+    start_cheat_block_timestamp(contract, FINALIZE_TS + 1000 * 3_600);
     gov.vote_with_conviction(proposal_id, conviction_id, 5);
 
-    // weight = level(1) * available(50_000 - 1_000 tokens).
-    assert(gov.get_conviction_power(candidate(), conviction_id) == 49_000 * ONE, 'bad power');
-    assert(gov.get_proposal_total_power(proposal_id) == 49_000 * ONE, 'bad total power');
+    assert(gov.get_conviction_power(candidate(), conviction_id) == 1_000_000_000_000,
+        'bad power');
+    assert(gov.get_proposal_total_power(proposal_id) == 1_000_000_000_000, 'bad total power');
 
     gov.execute_proposal(proposal_id);
 
@@ -272,12 +277,16 @@ fn test_score_1_to_3_uses_mini_reward_multiplier() {
     let p0 = create_proposal(contract, funding_wallet(), "proposal 0 evidence");
     start_cheat_caller_address(contract, candidate());
     let c0 = gov.create_conviction(1, 1_000 * ONE);
-    gov.vote_with_conviction(p0, c0, 5);
 
     // Proposal 1 -> score 2 -> mini reward multiplier.
     let p1 = create_proposal(contract, funding_wallet(), "proposal 1 evidence");
     start_cheat_caller_address(contract, candidate());
     let c1 = gov.create_conviction(1, 1_000 * ONE);
+
+    // Both convictions are locked from mint time; mature them 1000 hours
+    // before voting so the recorded weights are non-zero.
+    start_cheat_block_timestamp(contract, FINALIZE_TS + 1000 * 3_600);
+    gov.vote_with_conviction(p0, c0, 5);
     gov.vote_with_conviction(p1, c1, 2);
 
     gov.execute_proposal(p0);
@@ -307,6 +316,8 @@ fn test_negative_score_slashes_proposal_deposit() {
 
     start_cheat_caller_address(contract, candidate());
     let conviction_id = gov.create_conviction(1, 1_000 * ONE);
+
+    start_cheat_block_timestamp(contract, FINALIZE_TS + 1000 * 3_600);
     gov.vote_with_conviction(proposal_id, conviction_id, -5);
 
     gov.execute_proposal(proposal_id);
@@ -330,9 +341,12 @@ fn test_execute_proposal_below_threshold_reverts() {
 
     start_cheat_caller_address(contract, candidate());
     let conviction_id = gov.create_conviction(1, 1_000 * ONE);
+
+    // Even after 100 hours (power = sqrt(1e21 * 100) = 1e13), the power is
+    // far below the 200_000-token threshold.
+    start_cheat_block_timestamp(contract, FINALIZE_TS + 100 * 3_600);
     gov.vote_with_conviction(proposal_id, conviction_id, 5);
 
-    // total power (49_000 tokens) < threshold (200_000 tokens).
     gov.execute_proposal(proposal_id);
 }
 
@@ -354,10 +368,21 @@ fn test_conviction_power_and_release_accounting() {
     assert(gov.governance_locked(candidate()) == 2_000 * ONE, 'locked should increase');
     assert(gov.governance_available(candidate()) == 48_000 * ONE, 'available should shrink');
 
+    // Conviction matures 500 hours before voting: weight at vote time (frozen
+    // in the score histogram) and at execution is
+    //   level(3) * sqrt(2_000 tokens * 500 h) = 3 * sqrt(1e24) = 3e12 wei.
+    // Note: decay of unlocked grants is irrelevant to voting power - only the
+    // locked amount and lock time feed the formula.
+    start_cheat_block_timestamp(contract, FINALIZE_TS + 500 * 3_600);
     gov.vote_with_conviction(proposal_id, conviction_id, 5);
-    assert(gov.get_conviction_power(candidate(), conviction_id) == 3 * 48_000 * ONE,
+
+    assert(gov.get_conviction_power(candidate(), conviction_id) == 3_000_000_000_000,
         'bad voting power');
-    assert(gov.get_proposal_total_power(proposal_id) == 3 * 48_000 * ONE, 'bad total power');
+    assert(gov.get_proposal_total_power(proposal_id) == 3_000_000_000_000, 'bad total power');
+
+    // Rewind to grant mint time so decay reads revert to zero for the
+    // release-accounting assertions below.
+    start_cheat_block_timestamp(contract, FINALIZE_TS);
 
     // remove_support resets power to zero.
     gov.remove_support(conviction_id);

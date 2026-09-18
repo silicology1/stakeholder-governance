@@ -43,7 +43,11 @@
 //!   with a chosen level (1-10). They can then `vote_with_conviction` on
 //!   a single proposal at a time, casting a score in [-5, +5]. Voting
 //!   power for that vote is:
-//!       weight = level * available_governance_balance
+//!       weight = level * sqrt(locked_amount * hours_locked)
+//!   where `locked_amount` is the governance-token stake frozen in the
+//!   conviction and `hours_locked` counts whole hours since the conviction
+//!   was created (`created_at`). Power therefore grows sub-linearly with
+//!   both stake and lock time.
 //!   Multiple supporters accumulate weighted scores in a histogram.
 //!   Once the admin-set `conviction_threshold` of total voting power is
 //!   cleared, anyone can call `execute_proposal` which:
@@ -93,8 +97,9 @@
 //!
 //! SCORE VOTING POWER
 //! -------------------
-//! * weight = level (1-10) * available_governance_balance
-//! * available_governance_balance = decayed_total - locked_in_convictions
+//! * weight = level (1-10) * sqrt(governance_tokens_locked * hours_locked)
+//! * hours_locked = (now - created_at) / 3600, floored; 0 before the first
+//!   whole hour elapses.
 //! * Multiple convictions per holder are allowed (each with own level).
 //! * A conviction can only support one proposal at a time.
 //!
@@ -1145,8 +1150,8 @@ pub mod StakeholderConviction {
             pm.supporter_count = idx + 1;
             self.proposals.entry(proposal_id).write(pm);
 
-            // Weighted vote: level * available governance balance
-            let weight = self._vote_weight(caller, @c);
+            // Weighted vote: level * sqrt(locked amount * hours locked)
+            let weight = self._vote_weight(@c);
 
             // Bucket the score (index = score + 5)
             let bucket: u8 = (score + 5).try_into().unwrap();
@@ -1169,7 +1174,7 @@ pub mod StakeholderConviction {
             assert(c.owner == caller, 'Unauthorized');
             assert(c.is_supporting, 'NotSupporting');
 
-            let power = self._vote_weight(caller, @c);
+            let power = self._vote_weight(@c);
             let proposal_id = c.active_proposal;
 
             c.is_supporting = false;
@@ -1278,7 +1283,7 @@ pub mod StakeholderConviction {
             self: @ContractState, owner: ContractAddress, conviction_id: u32,
         ) -> u256 {
             let c = self.convictions.entry((owner, conviction_id)).read();
-            self._vote_weight(owner, @c)
+            self._vote_weight(@c)
         }
 
         fn get_proposal_total_power(self: @ContractState, proposal_id: u256) -> u256 {
@@ -1882,14 +1887,19 @@ pub mod StakeholderConviction {
 
         // ---- score voting power ----
 
-        /// weight = level * available_governance_balance
-        fn _vote_weight(self: @ContractState, holder: ContractAddress, c: @Conviction) -> u256 {
+        /// weight = level * isqrt(locked_amount * hours_locked)
+        /// hours_locked counts from `created_at` (when the stash was locked),
+        /// floored to whole hours. At 0 elapsed hours the weight is 0.
+        fn _vote_weight(self: @ContractState, c: @Conviction) -> u256 {
             if !*c.is_supporting {
                 return 0;
             }
-            let available = self.governance_available(holder);
+            let now: u64 = get_block_timestamp();
+            let elapsed: u64 = if now >= *c.created_at { now - *c.created_at } else { 0 };
+            let hours_locked: u64 = elapsed / SECONDS_PER_HOUR;
+            let locked_u256: u256 = (*c.amount).into();
             let level_u256: u256 = (*c.level).into();
-            level_u256 * available
+            level_u256 * isqrt(locked_u256 * hours_locked.into())
         }
 
         fn _proposal_total_power(
@@ -1904,7 +1914,7 @@ pub mod StakeholderConviction {
                 let s = self.proposal_supporters.entry((proposal_id, i)).read();
                 let c = self.convictions.entry((s.owner, s.conviction_id)).read();
                 if c.is_supporting && c.active_proposal == proposal_id {
-                    total += self._vote_weight(s.owner, @c);
+                    total += self._vote_weight(@c);
                 }
                 i += 1;
             };
