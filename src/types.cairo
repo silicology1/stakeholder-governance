@@ -8,5 +8,5 @@ mod governance;
 mod admin;
 
 pub use dispute::{Dispute, Grant};
-pub use governance::{Conviction, FundingProposal, Supporter};
+pub use governance::{Conviction, FundingProposal};
 pub use admin::{PendingChange, PendingProtectedChange, PendingUpgrade, PendingAdminChange};

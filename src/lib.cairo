@@ -40,28 +40,36 @@
 //!   ----------------------------------------------------------------
 //!   An empowered stakeholder creates a conviction: locks some of their
 //!   *currently available* (decayed, unlocked) governance-token balance
-//!   with a chosen level (1-10). They can then `vote_with_conviction` on
-//!   a single proposal at a time, casting a score in [-5, +5]. Voting
-//!   power for that vote is:
-//!       weight = level * sqrt(locked_amount * hours_locked)
-//!   where `locked_amount` is the governance-token stake frozen in the
-//!   conviction and `hours_locked` counts whole hours since the conviction
-//!   was created (`created_at`). Power therefore grows sub-linearly with
-//!   both stake and lock time.
+//!   with a chosen level (1-10). The level fixes the lock window
+//!   (`lock_duration = level * conviction_base_lock`) during which the
+//!   stake is frozen. While the conviction is live (`now < created_at +
+//!   lock_duration`) it may vote on up to `max_votes_per_conviction`
+//!   distinct proposals, each time casting a score in [-5, +5]. Voting
+//!   power for a vote is STATIC (frozen at vote time):
+//!       weight = isqrt(level * locked_amount)
+//!   so a conviction's power never grows or decays with lock time and
+//!   cannot be re-arbitraged after the votes are cast.
+//!   Votes are PERMANENT (commitments): there is no `remove_support`, and a
+//!   conviction can never change or retract an already-cast vote. A proposal's
+//!   total power (`power_total`) is a frozen accumulator bumped at vote time,
+//!   so the weighted final score cannot be manipulated after the fact and
+//!   `execute_proposal` is O(1) regardless of how many backers voted. Once its
+//!   lock window has elapsed, a conviction can be `release_conviction`d to
+//!   free the locked stake for a new conviction without touching old votes.
 //!   Multiple supporters accumulate weighted scores in a histogram.
 //!   Once the admin-set `conviction_threshold` of total voting power is
 //!   cleared, anyone can call `execute_proposal` which:
 //!     - Computes the weighted final score from the histogram
-//!     - If final_score > 0: refunds the proposal deposit and mints a
-//!       score-based reward to the funding_wallet
-//!     - If final_score <= 0: slashes the proposal deposit
+//!     - If final_score >= 0: refunds the proposal deposit and, when
+//!       score > 0, mints a score-based reward to the funding_wallet
+//!     - If final_score < 0: slashes the proposal deposit
 //!
 //!   ANTI-SYBIL: PROPOSAL DEPOSIT
 //!   --------------------------------
 //!   Creating a proposal requires depositing `reputation_stake` of this
 //!   contract's own ERC20 (must `approve` first). This filters out spam.
-//!   The deposit is refunded on positive final score, slashed to the
-//!   slash_pool on zero or negative.
+//!   The deposit is refunded on zero or positive final score, slashed to
+//!   the slash_pool on negative.
 //!
 //!   MONTHLY INFLATION + BURN RECYCLING BUDGET
 //!   ---------------------------------------------
@@ -74,7 +82,11 @@
 //!     - recycle_part   = total ERC20 tokens actually burned during the
 //!       previous month (decay burns + explicit `burn` calls).
 //!   A month's unutilized budget is burned (written off) at rollover; it is
-//!   NOT recycled. Rewards that exceed the remaining budget revert.
+//!   NOT recycled. Reward mints are BEST-EFFORT: a reward that exceeds the
+//!   remaining budget (or the MAX_SUPPLY headroom) is skipped rather than
+//!   reverted, so the underlying operation (execution, slash, decay) always
+//!   succeeds. Whether a reward was paid is observable: `BudgetRewardMinted`
+//!   and the reward-specific event are emitted only on an actual mint.
 //!
 //!   SUPPLY: fixed cap, one-time initial mint
 //!   -------------------------------------------
@@ -90,7 +102,10 @@
 //!   threshold, reward multipliers, decay rates, etc.) uses a two-step
 //!   `propose_*` / `execute_*` pair with a 3-day timelock
 //!   (`TIMELOCK_DURATION = 259_200` seconds). Class-hash upgrades use a
-//!   separate 7-day timelock (`UPGRADE_TIMELOCK_DURATION = 604_800`).
+//!   separate 7-day timelock (`UPGRADE_TIMELOCK_DURATION = 604_800`), as does
+//!   the two-step `propose_disable_upgrades` / `execute_disable_upgrades`
+//!   permanent cut of the upgrade path (a single compromised key cannot brick
+//!   the recovery path instantly).
 //!
 //! JUROR STAKE LOCKING (anti-evasion)
 //! ----------------------------------
@@ -106,16 +121,23 @@
 //! ------------------------------
 //! * `request_evaluation` requires locking `evaluation_bond_amount`
 //!   (admin-timelocked, default 50 tokens) of this contract's own token.
-//!   Refunded on positive score, otherwise added to `slash_pool`.
+//!   Refunded on score zero or positive (`final_score >= 0`), otherwise
+//!   added to `slash_pool`.
 //! * One open request at a time per candidate.
 //!
 //! SCORE VOTING POWER
 //! -------------------
-//! * weight = level (1-10) * sqrt(governance_tokens_locked * hours_locked)
-//! * hours_locked = (now - created_at) / 3600, floored; 0 before the first
-//!   whole hour elapses.
+//! * weight = isqrt(level (1-10) * governance_tokens_locked), STATIC: fixed
+//!   at vote time and frozen on the live proposal histogram + `power_total`,
+//!   so it never drifts with elapsed lock time.
+//! * A conviction is votable only while `now < created_at + lock_duration`
+//!   (`LockExpired`), where `lock_duration = level * conviction_base_lock`.
+//! * A live conviction may vote on up to `max_votes_per_conviction` distinct
+//!   proposals (never the same proposal twice) before `release_conviction`.
 //! * Multiple convictions per holder are allowed (each with own level).
-//! * A conviction can only support one proposal at a time.
+//! * No per-proposal supporter registry: `FundingProposal.power_total` is the
+//!   frozen accumulator at vote time, so voting is unbounded and
+//!   `execute_proposal` is O(1).
 //!
 //! REWARD MINTING
 //! ---------------
@@ -123,7 +145,9 @@
 //!   (for scores 1-3) are admin-timelocked.
 //! * reward = final_score * multiplier, minted to funding_wallet on
 //!   positive final score, subject to the monthly inflation budget
-//!   (see "MONTHLY INFLATION + BURN RECYCLING BUDGET" above).
+//!   (see "MONTHLY INFLATION + BURN RECYCLING BUDGET" above). Best-effort:
+//!   the proposal always executes and refunds the author's deposit; only the
+//!   payout is skipped when the budget/supply cap has no room.
 //!
 //! CODE ORGANIZATION
 //! -----------------
@@ -138,7 +162,7 @@
 mod constants;
 mod events;
 mod types;
-mod utils;
+pub mod utils;
 
 #[starknet::interface]
 pub trait IStakeholderConviction<TContractState> {
@@ -171,7 +195,6 @@ pub trait IStakeholderConviction<TContractState> {
     fn vote_with_conviction(
         ref self: TContractState, proposal_id: u256, conviction_id: u32, score: i8,
     );
-    fn remove_support(ref self: TContractState, conviction_id: u32);
     fn release_conviction(ref self: TContractState, conviction_id: u32);
     fn execute_proposal(ref self: TContractState, proposal_id: u256);
 
@@ -222,8 +245,6 @@ pub trait IStakeholderConviction<TContractState> {
     fn get_dispute_evidence(self: @TContractState, dispute_id: u256) -> ByteArray;
 
     // ---- admin: timelocked parameter changes ----
-    fn propose_set_funding_token(ref self: TContractState, token: starknet::ContractAddress);
-    fn execute_set_funding_token(ref self: TContractState);
     fn propose_set_evaluation_bond_amount(ref self: TContractState, amount: u256);
     fn execute_set_evaluation_bond_amount(ref self: TContractState);
     fn propose_set_reputation_stake(ref self: TContractState, amount: u256);
@@ -253,6 +274,12 @@ pub trait IStakeholderConviction<TContractState> {
     fn propose_set_num_draws(ref self: TContractState, num_draws: u32);
     fn execute_set_num_draws(ref self: TContractState);
     fn get_num_draws(self: @TContractState) -> u32;
+    fn propose_set_conviction_base_lock(ref self: TContractState, lock_duration: u64);
+    fn execute_set_conviction_base_lock(ref self: TContractState);
+    fn get_conviction_base_lock(self: @TContractState) -> u64;
+    fn propose_set_max_votes_per_conviction(ref self: TContractState, max_votes: u64);
+    fn execute_set_max_votes_per_conviction(ref self: TContractState);
+    fn get_max_votes_per_conviction(self: @TContractState) -> u64;
     fn propose_set_inflation_rate_bps(ref self: TContractState, bps: u16);
     fn execute_set_inflation_rate_bps(ref self: TContractState);
     fn propose_set_protected_address(
@@ -287,11 +314,15 @@ pub trait IStakeholderConviction<TContractState> {
     // ---- upgradeability ----
     fn propose_upgrade(ref self: TContractState, new_class_hash: starknet::ClassHash);
     fn execute_upgrade(ref self: TContractState);
-    fn disable_upgrades_forever(ref self: TContractState);
+    fn propose_disable_upgrades(ref self: TContractState);
+    fn execute_disable_upgrades(ref self: TContractState);
     fn is_upgrades_disabled(self: @TContractState) -> bool;
     fn get_pending_upgrade(
         self: @TContractState,
     ) -> StakeholderConviction::PendingUpgrade;
+    fn get_pending_upgrade_disable(
+        self: @TContractState,
+    ) -> StakeholderConviction::PendingChange;
 
     // ---- views ----
     fn get_dispute(self: @TContractState, dispute_id: u256) -> StakeholderConviction::Dispute;
@@ -353,10 +384,17 @@ pub mod StakeholderConviction {
     impl ERC20MetadataImpl = ERC20Component::ERC20MetadataImpl<ContractState>;
     impl ERC20InternalImpl = ERC20Component::InternalImpl<ContractState>;
 
-    #[abi(embed_v0)]
+    // NOTE: AccessControlMixinImpl is intentionally NOT `#[abi(embed_v0)]`.
+    // Embedding it would expose unrestricted external grant_role / revoke_role /
+    // renounce_role entrypoints that bypass the timelocked admin roster and the
+    // last-admin guard. The impl is kept (unembedded) so that internal code can
+    // still call `self.accesscontrol.has_role(...)` via trait method resolution.
     impl AccessControlMixinImpl =
         AccessControlComponent::AccessControlMixinImpl<ContractState>;
     impl AccessControlInternalImpl = AccessControlComponent::InternalImpl<ContractState>;
+    impl SRC5InternalImpl = SRC5Component::InternalImpl<ContractState>;
+    #[abi(embed_v0)]
+    impl SRC5Impl = SRC5Component::SRC5Impl<ContractState>;
     impl ReentrancyGuardInternalImpl = ReentrancyGuardComponent::InternalImpl<ContractState>;
 
     #[abi(embed_v0)]
@@ -385,6 +423,7 @@ pub mod StakeholderConviction {
         upgradeable: UpgradeableComponent::Storage,
 
         pending_upgrade: PendingUpgrade,
+        pending_upgrade_disable: PendingChange,
         upgrades_disabled: bool,
 
         commit_duration: u64,
@@ -439,14 +478,14 @@ pub mod StakeholderConviction {
         // ---- score voting / convictions ----
         next_conviction_id: Map<ContractAddress, u32>,
         convictions: Map<(ContractAddress, u32), Conviction>,
+        conviction_voted_on: Map<(ContractAddress, u32, u256), bool>,
+        conviction_base_lock: u64,
+        max_votes_per_conviction: u64,
 
         // ---- proposals ----
         proposal_count: u256,
         proposals: Map<u256, FundingProposal>,
-        proposal_supporters: Map<(u256, u32), Supporter>,
         proposal_score_counts: Map<(u256, u8), u256>,
-        proposal_total_votes: Map<u256, u256>,
-        proposal_total_weight: Map<u256, u256>,
 
         // ---- ERC20 balance decay ----
         decay_rate_bps: u16,
@@ -510,7 +549,6 @@ pub mod StakeholderConviction {
         ConvictionCreated: ConvictionCreated,
         ConvictionReleased: ConvictionReleased,
         SupportAdded: SupportAdded,
-        SupportRemoved: SupportRemoved,
         ProposalCreated: ProposalCreated,
         ProposalExecuted: ProposalExecuted,
         ScoreRewardReleased: ScoreRewardReleased,
@@ -531,6 +569,7 @@ pub mod StakeholderConviction {
         AdminRemoved: AdminRemoved,
         UpgradeProposed: UpgradeProposed,
         UpgradeExecuted: UpgradeExecuted,
+        UpgradeDisableProposed: UpgradeDisableProposed,
         UpgradesDisabledForever: UpgradesDisabledForever,
     }
 
@@ -559,6 +598,7 @@ pub mod StakeholderConviction {
         assert(vrf_provider.is_non_zero(), 'ZeroAddress');
         assert(evaluation_bond_amount > 0, 'ZeroAmount');
         assert(reputation_stake > 0, 'ZeroAmount');
+        assert(conviction_threshold > 0, 'ZeroAmount');
         assert(reward_multiplier > 0, 'ZeroAmount');
         assert(mini_reward_multiplier > 0, 'ZeroAmount');
 
@@ -573,6 +613,8 @@ pub mod StakeholderConviction {
         self.reveal_duration.write(DEFAULT_REVEAL_DURATION);
         self.non_reveal_slash_bps.write(DEFAULT_SLASH_BPS);
         self.num_draws.write(DEFAULT_NUM_DRAWS);
+        self.conviction_base_lock.write(DEFAULT_CONVICTION_BASE_LOCK);
+        self.max_votes_per_conviction.write(DEFAULT_MAX_VOTES_PER_CONVICTION);
 
         // Timelocked admin parameters
         self.evaluation_bond_amount.write(evaluation_bond_amount);
@@ -668,6 +710,7 @@ pub mod StakeholderConviction {
         fn request_evaluation(ref self: ContractState, evidence: ByteArray) -> u256 {
             self.reentrancyguard.start();
             assert(evidence.len() > 0, 'EvidenceRequired');
+            assert(evidence.len() <= MAX_EVIDENCE_LEN, 'EvidenceTooLong');
 
             let candidate = get_caller_address();
             assert(!self.has_active_dispute.entry(candidate).read(), 'AlreadyUnderEvaluation');
@@ -790,6 +833,7 @@ pub mod StakeholderConviction {
         }
 
         fn commit_vote(ref self: ContractState, dispute_id: u256, commit_hash: felt252) {
+            self.reentrancyguard.start();
             let caller = get_caller_address();
             let d = self.disputes.entry(dispute_id).read();
             assert(d.phase == PHASE_COMMIT, 'NotCommitPhase');
@@ -803,9 +847,11 @@ pub mod StakeholderConviction {
             self.dispute_committed.entry((dispute_id, caller)).write(true);
 
             self.emit(VoteCommitted { dispute_id, juror: caller });
+            self.reentrancyguard.end();
         }
 
         fn reveal_vote(ref self: ContractState, dispute_id: u256, score: i8, salt: felt252) {
+            self.reentrancyguard.start();
             let caller = get_caller_address();
             let mut d = self.disputes.entry(dispute_id).read();
             assert(get_block_timestamp() >= d.commit_deadline, 'CommitStillOpen');
@@ -832,6 +878,7 @@ pub mod StakeholderConviction {
             self._release_dispute_lock(dispute_id, caller);
 
             self.emit(VoteRevealed { dispute_id, juror: caller, score });
+            self.reentrancyguard.end();
         }
 
         fn slash_non_revealer(
@@ -866,8 +913,9 @@ pub mod StakeholderConviction {
             self.emit(JurorSlashed { dispute_id, juror, amount: slash_amount });
 
             let caller = get_caller_address();
-            if caller != juror && SLASH_KEEPER_REWARD > 0 {
-                self._mint_from_budget(caller, SLASH_KEEPER_REWARD);
+            if caller != juror
+                && SLASH_KEEPER_REWARD > 0
+                && self._mint_from_budget(caller, SLASH_KEEPER_REWARD) {
                 self
                     .emit(
                         SlashKeeperRewarded {
@@ -904,7 +952,36 @@ pub mod StakeholderConviction {
                 i += 1;
             };
 
-            assert(total_weight > 0, 'NoReveals');
+            if total_weight == 0 {
+                // Zero reveals: no juror participated, so there is no signal to
+                // grade. Settle the dispute as score-neutral (final score 0),
+                // refund the evaluation bond, and clear the active-dispute flags
+                // so the candidate is not permanently locked out.
+                d.final_score = 0;
+                d.final_score_set = true;
+                d.total_weight_revealed = 0;
+                d.total_coherent_weight = 0;
+                d.phase = PHASE_FINALIZED;
+                d.bond_settled = true;
+
+                let requester = d.requester;
+                let bond_to_refund = d.bond_amount;
+                self.disputes.entry(dispute_id).write(d);
+
+                if requester.is_non_zero() {
+                    self.has_active_dispute.entry(requester).write(false);
+                    self.active_dispute_for_candidate.entry(requester).write(0);
+                }
+                if bond_to_refund > 0 {
+                    self.erc20._transfer(get_contract_address(), requester, bond_to_refund);
+                    self.emit(BondRefunded { dispute_id, requester, amount: bond_to_refund });
+                }
+
+                self.emit(DisputeFinalized { dispute_id, candidate: d.candidate, final_score: 0 });
+                self.reentrancyguard.end();
+                return;
+            }
+
             let total_weight_i64: i64 = total_weight.into();
             let mean_scaled: i64 = sum_weighted_scaled / total_weight_i64;
 
@@ -1007,8 +1084,8 @@ pub mod StakeholderConviction {
             // bond settlement
             let bond_amount = d.bond_amount;
             let requester = d.requester;
-            let refund_bond = bond_amount > 0 && final_score > 0;
-            let slash_bond = bond_amount > 0 && final_score <= 0;
+            let refund_bond = bond_amount > 0 && final_score >= 0;
+            let slash_bond = bond_amount > 0 && final_score < 0;
             if slash_bond {
                 d.slash_pool += bond_amount;
             }
@@ -1101,6 +1178,7 @@ pub mod StakeholderConviction {
             let caller = get_caller_address();
             assert(funding_wallet.is_non_zero(), 'ZeroAddress');
             assert(evidence.len() > 0, 'EvidenceRequired');
+            assert(evidence.len() <= MAX_EVIDENCE_LEN, 'EvidenceTooLong');
 
             // Anti-Sybil deposit: pull reputation_stake of own ERC20
             let deposit = self.reputation_stake.read();
@@ -1116,9 +1194,8 @@ pub mod StakeholderConviction {
                 evidence,
                 created_at: get_block_timestamp(),
                 executed: false,
-                supporter_count: 0,
+                power_total: 0,
                 deposit_amount: deposit,
-                deposit_settled: false,
                 final_score: 0,
                 final_score_set: false,
             };
@@ -1150,15 +1227,20 @@ pub mod StakeholderConviction {
             let id = self.next_conviction_id.entry(caller).read();
             self.next_conviction_id.entry(caller).write(id + 1);
 
+            // Lock window: level * conviction_base_lock (admin-tunable), capped
+            // at MAX_LOCK_DURATION so admin can never brick the release path.
+            let level_u64: u64 = level.into();
+            let lock_duration: u64 = level_u64 * self.conviction_base_lock.read();
+            assert(lock_duration <= MAX_LOCK_DURATION, 'LockTooLong');
+
             let c = Conviction {
                 owner: caller,
                 id,
                 level,
                 amount,
                 created_at: get_block_timestamp(),
-                is_supporting: false,
-                active_proposal: 0,
-                support_start: 0,
+                lock_duration,
+                votes_cast: 0,
                 released: false,
             };
             self.convictions.entry((caller, id)).write(c);
@@ -1185,61 +1267,30 @@ pub mod StakeholderConviction {
             let mut c = self.convictions.entry((caller, conviction_id)).read();
             assert(c.owner == caller, 'Unauthorized');
             assert(!c.released, 'ConvictionReleased');
-            assert(!c.is_supporting, 'AlreadySupporting');
+            let already = self.conviction_voted_on.entry((caller, conviction_id, proposal_id)).read();
+            assert(!already, 'AlreadyVotedOnProposal');
+            // Mirror the Solidity gate: votes only inside the lock window.
+            let lock_expiry = c.created_at + c.lock_duration;
+            assert(get_block_timestamp() < lock_expiry, 'LockExpired');
+            assert(c.votes_cast < self.max_votes_per_conviction.read(), 'MaxVotesReached');
 
-            c.is_supporting = true;
-            c.active_proposal = proposal_id;
-            c.support_start = get_block_timestamp();
-            self.convictions.entry((caller, conviction_id)).write(c);
-
-            // Record supporter
-            let idx = p.supporter_count;
-            self
-                .proposal_supporters
-                .entry((proposal_id, idx))
-                .write(Supporter { owner: caller, conviction_id });
-            let mut pm = self.proposals.entry(proposal_id).read();
-            pm.supporter_count = idx + 1;
-            self.proposals.entry(proposal_id).write(pm);
-
-            // Weighted vote: level * sqrt(locked amount * hours locked)
+            // Weight is STATIC (frozen at vote time): level * isqrt(amount)
             let weight = self._vote_weight(@c);
 
-            // Bucket the score (index = score + 5)
+            // Bucket the score and bump the proposal's frozen power accumulator
             let bucket: u8 = (score + 5).try_into().unwrap();
             let cur = self.proposal_score_counts.entry((proposal_id, bucket)).read();
             self.proposal_score_counts.entry((proposal_id, bucket)).write(cur + weight);
 
-            let tv = self.proposal_total_votes.entry(proposal_id).read();
-            self.proposal_total_votes.entry(proposal_id).write(tv + 1);
-            let tw = self.proposal_total_weight.entry(proposal_id).read();
-            self.proposal_total_weight.entry(proposal_id).write(tw + weight);
+            let mut pm = self.proposals.entry(proposal_id).read();
+            pm.power_total += weight;
+            self.proposals.entry(proposal_id).write(pm);
+
+            c.votes_cast += 1;
+            self.convictions.entry((caller, conviction_id)).write(c);
+            self.conviction_voted_on.entry((caller, conviction_id, proposal_id)).write(true);
 
             self.emit(SupportAdded { proposal_id, owner: caller, conviction_id });
-            self.reentrancyguard.end();
-        }
-
-        fn remove_support(ref self: ContractState, conviction_id: u32) {
-            self.reentrancyguard.start();
-            let caller = get_caller_address();
-            let mut c = self.convictions.entry((caller, conviction_id)).read();
-            assert(c.owner == caller, 'Unauthorized');
-            assert(c.is_supporting, 'NotSupporting');
-
-            let power = self._vote_weight(@c);
-            let proposal_id = c.active_proposal;
-
-            c.is_supporting = false;
-            c.active_proposal = 0;
-            c.support_start = 0;
-            self.convictions.entry((caller, conviction_id)).write(c);
-
-            self
-                .emit(
-                    SupportRemoved {
-                        proposal_id, owner: caller, conviction_id, power_at_removal: power,
-                    },
-                );
             self.reentrancyguard.end();
         }
 
@@ -1248,9 +1299,15 @@ pub mod StakeholderConviction {
             let caller = get_caller_address();
             let mut c = self.convictions.entry((caller, conviction_id)).read();
             assert(c.owner == caller, 'Unauthorized');
-            assert(!c.is_supporting, 'StillSupporting');
             assert(!c.released, 'AlreadyReleased');
+            // Mirror the Solidity gate: stake stays frozen for the whole
+            // level-based lock window; release only after it elapses.
+            let lock_expiry = c.created_at + c.lock_duration;
+            assert(get_block_timestamp() >= lock_expiry, 'LockNotExpired');
 
+            // Votes are permanent: releasing frees the locked governance stake so
+            // it can back a new conviction, but the already-cast votes (frozen
+            // histogram weight + proposal `power_total`) stay intact.
             let amount = c.amount;
             let locked = self.governance_locked_total.entry(caller).read();
             assert(locked >= amount, 'LockAccountingError');
@@ -1269,7 +1326,8 @@ pub mod StakeholderConviction {
             let mut p = self.proposals.entry(proposal_id).read();
             assert(!p.executed, 'AlreadyExecuted');
 
-            let total_power = self._proposal_total_power(proposal_id, p.supporter_count);
+            // O(1) threshold check against the frozen power accumulator.
+            let total_power = p.power_total;
             assert(total_power >= self.conviction_threshold.read(), 'ThresholdNotMet');
 
             // Compute weighted final score from histogram
@@ -1285,8 +1343,12 @@ pub mod StakeholderConviction {
 
             self.emit(ProposalExecuted { proposal_id, total_power, final_score });
 
-            // Deposit settlement + score-based reward
-            if final_score > 0 {
+            // Deposit settlement + score-based reward (score 0 is treated as
+            // neutral: deposit refunded, no reward minted). The reward is
+            // best-effort: if the month budget or supply cap has no room, the
+            // proposal still executes and the deposit is refunded - only the
+            // payout is skipped, never reverting the whole call.
+            if final_score >= 0 {
                 // Refund deposit
                 if deposit_amount > 0 {
                     self.erc20._transfer(get_contract_address(), author, deposit_amount);
@@ -1298,7 +1360,7 @@ pub mod StakeholderConviction {
                         );
                 }
 
-                // Mint score-based reward to funding_wallet
+                // Mint score-based reward to funding_wallet (best-effort)
                 let score_u256 = score_to_u256(final_score);
                 let rm = self.reward_multiplier.read();
                 let mrm = self.mini_reward_multiplier.read();
@@ -1307,8 +1369,7 @@ pub mod StakeholderConviction {
                 } else {
                     score_u256 * rm
                 };
-                if reward > 0 {
-                    self._mint_from_budget(funding_wallet, reward);
+                if reward > 0 && self._mint_from_budget(funding_wallet, reward) {
                     self
                         .emit(
                             ScoreRewardReleased {
@@ -1335,12 +1396,16 @@ pub mod StakeholderConviction {
             self: @ContractState, owner: ContractAddress, conviction_id: u32,
         ) -> u256 {
             let c = self.convictions.entry((owner, conviction_id)).read();
-            self._vote_weight(@c)
+            if c.votes_cast == 0 {
+                0
+            } else {
+                self._vote_weight(@c)
+            }
         }
 
         fn get_proposal_total_power(self: @ContractState, proposal_id: u256) -> u256 {
             let p = self.proposals.entry(proposal_id).read();
-            self._proposal_total_power(proposal_id, p.supporter_count)
+            p.power_total
         }
 
         // ----------------------------------------------------------
@@ -1356,9 +1421,11 @@ pub mod StakeholderConviction {
         }
 
         fn burn(ref self: ContractState, amount: u256) {
+            self.reentrancyguard.start();
             assert(amount > 0, 'ZeroAmount');
             self.erc20.burn(get_caller_address(), amount);
             self._track_burn(amount);
+            self.reentrancyguard.end();
         }
 
         // ----------------------------------------------------------
@@ -1492,18 +1559,9 @@ pub mod StakeholderConviction {
               // ADMIN - timelocked parameter changes
         // ----------------------------------------------------------
 
-        fn propose_set_funding_token(ref self: ContractState, token: ContractAddress) {
-            // Kept for ABI compatibility; funding_token was removed.
-            assert(token.is_non_zero(), 'ZeroAddress');
-            self._propose_change(PARAM_VRF_PROVIDER, 0);
-        }
-
-        fn execute_set_funding_token(ref self: ContractState) {
-            self._execute_change(PARAM_VRF_PROVIDER);
-        }
-
         fn propose_set_evaluation_bond_amount(ref self: ContractState, amount: u256) {
             assert(amount > 0, 'ZeroAmount');
+            assert(amount <= MAX_SUPPLY, 'TooHigh');
             self._propose_change(PARAM_EVALUATION_BOND_AMOUNT, amount);
         }
 
@@ -1514,6 +1572,7 @@ pub mod StakeholderConviction {
 
         fn propose_set_reputation_stake(ref self: ContractState, amount: u256) {
             assert(amount > 0, 'ZeroAmount');
+            assert(amount <= MAX_SUPPLY, 'TooHigh');
             self._propose_change(PARAM_REPUTATION_STAKE, amount);
         }
 
@@ -1523,6 +1582,8 @@ pub mod StakeholderConviction {
         }
 
         fn propose_set_conviction_threshold(ref self: ContractState, threshold: u256) {
+            assert(threshold > 0, 'ZeroAmount');
+            assert(threshold <= MAX_SUPPLY, 'TooHigh');
             self._propose_change(PARAM_CONVICTION_THRESHOLD, threshold);
         }
 
@@ -1532,6 +1593,8 @@ pub mod StakeholderConviction {
         }
 
         fn propose_set_reward_multiplier(ref self: ContractState, amount: u256) {
+            assert(amount > 0, 'ZeroAmount');
+            assert(amount <= MAX_SUPPLY, 'TooHigh');
             self._propose_change(PARAM_REWARD_MULTIPLIER, amount);
         }
 
@@ -1541,6 +1604,8 @@ pub mod StakeholderConviction {
         }
 
         fn propose_set_mini_reward_multiplier(ref self: ContractState, amount: u256) {
+            assert(amount > 0, 'ZeroAmount');
+            assert(amount <= MAX_SUPPLY, 'TooHigh');
             self._propose_change(PARAM_MINI_REWARD_MULTIPLIER, amount);
         }
 
@@ -1608,6 +1673,7 @@ pub mod StakeholderConviction {
         }
 
         fn propose_set_min_decay_for_reward(ref self: ContractState, amount: u256) {
+            assert(amount <= MAX_SUPPLY, 'TooHigh');
             self._propose_change(PARAM_MIN_DECAY_FOR_REWARD, amount);
         }
 
@@ -1617,6 +1683,7 @@ pub mod StakeholderConviction {
         }
 
         fn propose_set_caller_reward_amount(ref self: ContractState, amount: u256) {
+            assert(amount <= MAX_SUPPLY, 'TooHigh');
             self._propose_change(PARAM_CALLER_REWARD_AMOUNT, amount);
         }
 
@@ -1627,6 +1694,7 @@ pub mod StakeholderConviction {
 
         fn propose_set_num_draws(ref self: ContractState, num_draws: u32) {
             assert(num_draws >= MIN_NUM_DRAWS, 'BelowMinNumDraws');
+            assert(num_draws <= MAX_NUM_DRAWS, 'AboveMaxNumDraws');
             self._propose_change(PARAM_NUM_DRAWS, num_draws.into());
         }
 
@@ -1638,6 +1706,38 @@ pub mod StakeholderConviction {
 
         fn get_num_draws(self: @ContractState) -> u32 {
             self.num_draws.read()
+        }
+
+        fn propose_set_conviction_base_lock(ref self: ContractState, lock_duration: u64) {
+            assert(lock_duration > 0, 'InvalidDuration');
+            assert(lock_duration <= MAX_LOCK_DURATION, 'TooHigh');
+            self._propose_change(PARAM_CONVICTION_BASE_LOCK, lock_duration.into());
+        }
+
+        fn execute_set_conviction_base_lock(ref self: ContractState) {
+            let value = self._execute_change(PARAM_CONVICTION_BASE_LOCK);
+            let value_u64: u64 = value.try_into().unwrap();
+            self.conviction_base_lock.write(value_u64);
+        }
+
+        fn get_conviction_base_lock(self: @ContractState) -> u64 {
+            self.conviction_base_lock.read()
+        }
+
+        fn propose_set_max_votes_per_conviction(ref self: ContractState, max_votes: u64) {
+            assert(max_votes > 0, 'InvalidVotesCount');
+            assert(max_votes <= MAX_MAX_VOTES_PER_CONVICTION, 'TooHigh');
+            self._propose_change(PARAM_MAX_VOTES_PER_CONVICTION, max_votes.into());
+        }
+
+        fn execute_set_max_votes_per_conviction(ref self: ContractState) {
+            let value = self._execute_change(PARAM_MAX_VOTES_PER_CONVICTION);
+            let value_u64: u64 = value.try_into().unwrap();
+            self.max_votes_per_conviction.write(value_u64);
+        }
+
+        fn get_max_votes_per_conviction(self: @ContractState) -> u64 {
+            self.max_votes_per_conviction.read()
         }
 
         fn propose_set_inflation_rate_bps(ref self: ContractState, bps: u16) {
@@ -1794,9 +1894,26 @@ pub mod StakeholderConviction {
             self.emit(UpgradeExecuted { new_class_hash: pu.new_class_hash });
         }
 
-        fn disable_upgrades_forever(ref self: ContractState) {
+        fn propose_disable_upgrades(ref self: ContractState) {
             self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
             assert(!self.upgrades_disabled.read(), 'AlreadyDisabled');
+            assert(!self.pending_upgrade_disable.read().exists, 'AlreadyPending');
+            let effective_at = get_block_timestamp() + UPGRADE_TIMELOCK_DURATION;
+            self
+                .pending_upgrade_disable
+                .write(PendingChange { new_value: 1, effective_at, exists: true });
+            self.emit(UpgradeDisableProposed { effective_at });
+        }
+
+        fn execute_disable_upgrades(ref self: ContractState) {
+            self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
+            assert(!self.upgrades_disabled.read(), 'AlreadyDisabled');
+            let pc = self.pending_upgrade_disable.read();
+            assert(pc.exists, 'NoPendingChange');
+            assert(get_block_timestamp() >= pc.effective_at, 'TimelockNotElapsed');
+            self
+                .pending_upgrade_disable
+                .write(PendingChange { new_value: 0, effective_at: 0, exists: false });
             self
                 .pending_upgrade
                 .write(
@@ -1814,6 +1931,10 @@ pub mod StakeholderConviction {
 
         fn get_pending_upgrade(self: @ContractState) -> PendingUpgrade {
             self.pending_upgrade.read()
+        }
+
+        fn get_pending_upgrade_disable(self: @ContractState) -> PendingChange {
+            self.pending_upgrade_disable.read()
         }
 
         // ----------------------------------------------------------
@@ -1884,13 +2005,20 @@ pub mod StakeholderConviction {
                 return;
             }
 
+            // Clamp the rollover so a long-inactive contract settles at most
+            // MAX_ROLLOVER_MONTHS per call. This keeps the loop bounded and
+            // gas-fixed; a caller who touches the contract far in the future is
+            // served over successive calls instead of being hard-reverted.
             let elapsed = (now - start) / MONTH_SECONDS;
-            assert(elapsed <= MAX_ROLLOVER_MONTHS, 'TooManyMonthsBehind');
+            let mut settle = elapsed;
+            if settle > MAX_ROLLOVER_MONTHS {
+                settle = MAX_ROLLOVER_MONTHS;
+            }
 
             let mut idx = self.month_index.read();
             let mut i: u64 = 0;
             loop {
-                if i >= elapsed {
+                if i >= settle {
                     break;
                 }
 
@@ -1923,18 +2051,31 @@ pub mod StakeholderConviction {
             self.month_start.write(start);
         }
 
-        fn _mint_from_budget(ref self: ContractState, to: ContractAddress, amount: u256) {
-            assert(amount > 0, 'ZeroAmount');
+        /// Mint a reward from the current month's budget. Best-effort: returns
+        /// `true` only when actually minted, `false` (never reverts) when the
+        /// month budget or MAX_SUPPLY headroom is insufficient, so that the
+        /// calling operation (slash, decay, proposal execution) is never
+        /// blocked by reward availability.
+        fn _mint_from_budget(ref self: ContractState, to: ContractAddress, amount: u256) -> bool {
+            if amount == 0 {
+                return false;
+            }
             self._ensure_current_month();
 
             let month = self.month_index.read();
             let budget = self.month_budget.entry(month).read();
             let minted = self.month_minted.entry(month).read();
-            assert(minted + amount <= budget, 'BudgetExceeded');
+            if minted + amount > budget {
+                return false;
+            }
+            if self.erc20.total_supply() + amount > MAX_SUPPLY {
+                return false;
+            }
 
-            self._mint_capped(to, amount);
+            self.erc20.mint(to, amount);
             self.month_minted.entry(month).write(minted + amount);
             self.emit(BudgetRewardMinted { month, recipient: to, amount });
+            true
         }
 
         fn _track_burn(ref self: ContractState, amount: u256) {
@@ -2042,11 +2183,66 @@ pub mod StakeholderConviction {
         fn _mint_governance_tokens(
             ref self: ContractState, holder: ContractAddress, amount: u256,
         ) {
-            let id = self.governance_next_grant.entry(holder).read();
-            self.governance_next_grant.entry(holder).write(id + 1);
+            let count = self.governance_next_grant.entry(holder).read();
+            let slot = self._next_free_grant_slot(holder);
+            if slot < count {
+                // Reuse a slot whose previous grant has fully decayed to zero.
+                self
+                    .governance_grant
+                    .entry((holder, slot))
+                    .write(Grant { amount, minted_at: get_block_timestamp() });
+            } else if count < MAX_GOV_GRANTS_PER_HOLDER {
+                self.governance_next_grant.entry(holder).write(count + 1);
+                self
+                    .governance_grant
+                    .entry((holder, count))
+                    .write(Grant { amount, minted_at: get_block_timestamp() });
+            } else {
+                // At cap with no expired slot: overwrite the most-decayed grant.
+                self._overwrite_most_decayed_grant(holder, amount);
+            }
+        }
+
+        /// First index whose grant has fully decayed to zero, else `count`.
+        fn _next_free_grant_slot(self: @ContractState, holder: ContractAddress) -> u32 {
+            let count = self.governance_next_grant.entry(holder).read();
+            let mut i: u32 = 0;
+            loop {
+                if i >= count {
+                    break;
+                }
+                let g = self.governance_grant.entry((holder, i)).read();
+                if self._decayed_grant_amount(@g) == 0 {
+                    return i;
+                }
+                i += 1;
+            };
+            count
+        }
+
+        fn _overwrite_most_decayed_grant(
+            ref self: ContractState, holder: ContractAddress, amount: u256,
+        ) {
+            let count = self.governance_next_grant.entry(holder).read();
+            let g0 = self.governance_grant.entry((holder, 0)).read();
+            let mut target: u32 = 0;
+            let mut min_remaining: u256 = self._decayed_grant_amount(@g0);
+            let mut i: u32 = 1;
+            loop {
+                if i >= count {
+                    break;
+                }
+                let g = self.governance_grant.entry((holder, i)).read();
+                let remaining = self._decayed_grant_amount(@g);
+                if remaining < min_remaining {
+                    min_remaining = remaining;
+                    target = i;
+                }
+                i += 1;
+            };
             self
                 .governance_grant
-                .entry((holder, id))
+                .entry((holder, target))
                 .write(Grant { amount, minted_at: get_block_timestamp() });
         }
 
@@ -2081,38 +2277,13 @@ pub mod StakeholderConviction {
 
         // ---- score voting power ----
 
-        /// weight = level * isqrt(locked_amount * hours_locked)
-        /// hours_locked counts from `created_at` (when the stash was locked),
-        /// floored to whole hours. At 0 elapsed hours the weight is 0.
+        /// weight = isqrt(level * locked_amount); STATIC, fixed at vote time
+        /// and frozen on the histogram + proposal `power_total`, so it never
+        /// drifts with elapsed lock time.
         fn _vote_weight(self: @ContractState, c: @Conviction) -> u256 {
-            if !*c.is_supporting {
-                return 0;
-            }
-            let now: u64 = get_block_timestamp();
-            let elapsed: u64 = if now >= *c.created_at { now - *c.created_at } else { 0 };
-            let hours_locked: u64 = elapsed / SECONDS_PER_HOUR;
-            let locked_u256: u256 = (*c.amount).into();
             let level_u256: u256 = (*c.level).into();
-            level_u256 * isqrt(locked_u256 * hours_locked.into())
-        }
-
-        fn _proposal_total_power(
-            self: @ContractState, proposal_id: u256, supporter_count: u32,
-        ) -> u256 {
-            let mut total: u256 = 0;
-            let mut i: u32 = 0;
-            loop {
-                if i >= supporter_count {
-                    break;
-                }
-                let s = self.proposal_supporters.entry((proposal_id, i)).read();
-                let c = self.convictions.entry((s.owner, s.conviction_id)).read();
-                if c.is_supporting && c.active_proposal == proposal_id {
-                    total += self._vote_weight(@c);
-                }
-                i += 1;
-            };
-            total
+            let amount_u256: u256 = (*c.amount).into();
+            isqrt(level_u256 * amount_u256)
         }
 
         /// Compute weighted score from the 11-bucket histogram.
@@ -2168,6 +2339,10 @@ pub mod StakeholderConviction {
         // ---- ERC20 balance decay ----
 
         fn _apply_decay(ref self: ContractState, user: ContractAddress) {
+            // The contract's own escrow (locked juror stakes, evaluation bonds,
+            // proposal deposits) must never be burnable via the public decay
+            // entrypoints - burning it would make these obligations insolvent.
+            assert(user != get_contract_address(), 'ProtectedAddress');
             let caller = get_caller_address();
             let now = get_block_timestamp();
             let last = self.last_decay_at.entry(user).read();
@@ -2212,8 +2387,7 @@ pub mod StakeholderConviction {
                 if now >= last_reward + CALLER_REWARD_COOLDOWN {
                     self.last_caller_reward_at.entry(caller).write(now);
                     let reward = self.caller_reward_amount.read();
-                    if reward > 0 {
-                        self._mint_from_budget(caller, reward);
+                    if reward > 0 && self._mint_from_budget(caller, reward) {
                         self.emit(DecayCallerRewarded { caller, user, reward });
                     }
                 }

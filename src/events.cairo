@@ -161,16 +161,6 @@ pub struct SupportAdded {
 }
 
 #[derive(Drop, starknet::Event)]
-pub struct SupportRemoved {
-    #[key]
-    pub proposal_id: u256,
-    #[key]
-    pub owner: ContractAddress,
-    pub conviction_id: u32,
-    pub power_at_removal: u256,
-}
-
-#[derive(Drop, starknet::Event)]
 pub struct ProposalCreated {
     #[key]
     pub proposal_id: u256,
@@ -323,6 +313,12 @@ pub struct UpgradeProposed {
 pub struct UpgradeExecuted {
     #[key]
     pub new_class_hash: ClassHash,
+}
+
+#[derive(Drop, starknet::Event)]
+pub struct UpgradeDisableProposed {
+    #[key]
+    pub effective_at: u64,
 }
 
 #[derive(Drop, starknet::Event)]

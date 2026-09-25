@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 //! Governance-side types (Stages 2 and 3): non-transferable conviction
-//! records, funding proposals, and their supporter registry.
+//! records and funding proposals. There is no per-proposal supporter registry:
+//! a proposal's total power is a frozen accumulator (`power_total`) bumped at
+//! vote time, so `execute_proposal` is O(1) and voting is unbounded.
 
 use starknet::ContractAddress;
 
@@ -11,9 +13,12 @@ pub struct Conviction {
     pub level: u8,
     pub amount: u256,
     pub created_at: u64,
-    pub is_supporting: bool,
-    pub active_proposal: u256,
-    pub support_start: u64,
+    /// Total seconds this conviction's stake stays locked for. Computed as
+    /// `level * conviction_base_lock` at `create_conviction` time.
+    pub lock_duration: u64,
+    /// Number of distinct proposals this conviction has voted on; capped by
+    /// `max_votes_per_conviction`.
+    pub votes_cast: u64,
     pub released: bool,
 }
 
@@ -24,15 +29,10 @@ pub struct FundingProposal {
     pub evidence: ByteArray,
     pub created_at: u64,
     pub executed: bool,
-    pub supporter_count: u32,
+    /// Frozen sum of `isqrt(level * amount)` cast by all backers; bumped at
+    /// vote time and read O(1) in `execute_proposal`.
+    pub power_total: u256,
     pub deposit_amount: u256,
-    pub deposit_settled: bool,
     pub final_score: i64,
     pub final_score_set: bool,
-}
-
-#[derive(Drop, Serde, Copy, starknet::Store)]
-pub struct Supporter {
-    pub owner: ContractAddress,
-    pub conviction_id: u32,
 }

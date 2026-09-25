@@ -13,7 +13,7 @@ openzeppelin_access = "3.0.0"
 openzeppelin_introspection = "3.0.0"
 openzeppelin_security = "3.0.0"
 openzeppelin_upgrades = "3.0.0"
-cartridge_vrf = { git = "https://github.com/cartridge-gg/vrf" }
+cartridge_vrf = { git = "https://github.com/cartridge-gg/vrf", rev = "cc00aa61fa5157100cde134fac3148f318448e18" }
 
 [dev-dependencies]
 snforge_std = "0.63.0"
@@ -30,11 +30,11 @@ allow-prebuilt-plugins = ["snforge_std"]
 
 # Visit https://foundry-rs.github.io/starknet-foundry/appendix/scarb-toml.html for more information
 
-# [tool.snforge]                                             # Define `snforge` tool section
+[tool.snforge]                                             # Define `snforge` tool section
 # exit_first = true                                          # Stop tests execution immediately upon the first failure
-# fuzzer_runs = 1234                                         # Number of runs of the random fuzzer
-# fuzzer_seed = 1111                                         # Seed for the random fuzzer
-# tracked_resource = "sierra-gas"                            # Resource tracked by `snforge`
+fuzzer_runs = 100                                          # Number of runs of the random fuzzer
+fuzzer_seed = 1111                                         # Seed for the random fuzzer
+tracked_resource = "sierra-gas"
 
 # [[tool.snforge.fork]]                                      # Used for fork testing
 # name = "SOME_NAME"                                         # Fork name

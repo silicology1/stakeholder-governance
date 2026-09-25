@@ -25,6 +25,9 @@ pub const UPGRADE_TIMELOCK_DURATION: u64 = 604_800;
 
 pub const MIN_NUM_DRAWS: u32 = 10;
 pub const DEFAULT_NUM_DRAWS: u32 = 10;
+/// Bounds the juror draw loop in `request_evaluation` so a single call cannot
+/// consume unbounded gas. `propose_set_num_draws` rejects values above this.
+pub const MAX_NUM_DRAWS: u32 = 100;
 
 pub const DEFAULT_DECAY_RATE_BPS: u16 = 500;
 pub const DECAY_BPS_DENOM: u256 = 10_000;
@@ -37,19 +40,30 @@ pub const MAX_CONCURRENT_JUROR_LOCKS: u32 = 15;
 pub const MAX_REDRAW_ATTEMPTS: u32 = 20;
 pub const SLASH_KEEPER_REWARD: u256 = 500_000_000_000_000;
 
+pub const MAX_EVIDENCE_LEN: usize = 1024;
+
+/// Bounds the per-holder governance-grant array so `_decayed_total` (and
+/// every governance balance read) is O(MAX_GOV_GRANTS_PER_HOLDER).
+pub const MAX_GOV_GRANTS_PER_HOLDER: u32 = 64;
+
+/// Base lock period per conviction level (seconds). Level N conviction locks
+/// stake for `N * DEFAULT_CONVICTION_BASE_LOCK` (≈3 years for level 10).
+/// Admin-tunable via the timelocked `PARAM_CONVICTION_BASE_LOCK` param.
+pub const DEFAULT_CONVICTION_BASE_LOCK: u64 = 9_460_800;
+/// Upper bound on a single conviction's lock duration (5 years); enforced in
+/// `create_conviction` and by `propose_set_conviction_base_lock`.
+pub const MAX_LOCK_DURATION: u64 = 157_680_000;
+
+/// Default (and cap) on how many distinct proposals a single live conviction
+/// may vote on. Admin-tunable via the timelocked `PARAM_MAX_VOTES_PER_CONVICTION`.
+pub const DEFAULT_MAX_VOTES_PER_CONVICTION: u64 = 10;
+pub const MAX_MAX_VOTES_PER_CONVICTION: u64 = 100;
+
 pub const MONTHS_PER_YEAR: u64 = 12;
 pub const MONTH_SECONDS: u64 = 2_592_000;
 pub const MAX_INFLATION_BPS: u16 = 500;
 pub const DEFAULT_INFLATION_RATE_BPS: u16 = 500;
 pub const MAX_ROLLOVER_MONTHS: u64 = 120;
-
-pub const MAX_LOCK_DURATION: u64 = 157_680_000;
-
-pub const DEFAULT_EVALUATION_BOND_AMOUNT: u256 = 50_000_000_000_000_000_000;
-pub const DEFAULT_REPUTATION_STAKE: u256 = 10_000_000_000_000_000_000;
-pub const DEFAULT_CONVICTION_THRESHOLD: u256 = 1_000_000_000_000;
-pub const DEFAULT_REWARD_MULTIPLIER: u256 = 100_000_000_000_000_000_000;
-pub const DEFAULT_MINI_REWARD_MULTIPLIER: u256 = 10_000_000_000_000_000_000;
 
 // ---- timelocked-parameter keys ----
 pub const PARAM_EVALUATION_BOND_AMOUNT: felt252 = 'EVAL_BOND_AMT';
@@ -66,3 +80,5 @@ pub const PARAM_MIN_DECAY_FOR_REWARD: felt252 = 'MIN_DECAY_FOR_REWARD';
 pub const PARAM_CALLER_REWARD_AMOUNT: felt252 = 'CALLER_REWARD_AMOUNT';
 pub const PARAM_NUM_DRAWS: felt252 = 'NUM_DRAWS';
 pub const PARAM_INFLATION_RATE_BPS: felt252 = 'INFLATION_RATE';
+pub const PARAM_CONVICTION_BASE_LOCK: felt252 = 'CONVICTION_BASE_LOCK';
+pub const PARAM_MAX_VOTES_PER_CONVICTION: felt252 = 'MAX_VOTES_CONVICTION';
