@@ -9,8 +9,9 @@
 //!   1. the constructor's one-time `INITIAL_SUPPLY` mint, and
 //!   2. score-based reward minting in `execute_proposal`.
 //!   3. the slash-keeper reward in `slash_non_revealer`.
-//! Every mint goes through `_mint_capped`, which asserts
-//! `total_supply() + amount <= MAX_SUPPLY` first.
+//! The constructor's initial mint uses `_mint_capped`, while operational
+//! reward mints use `_mint_from_budget`, which checks both the monthly budget
+//! and `MAX_SUPPLY` headroom and is best-effort.
 //!
 //!   STAGE 1 - SELECTION (Kleros-style Schelling game)
 //!   ---------------------------------------------------
@@ -93,8 +94,8 @@
 //!     - `MAX_SUPPLY`     = 50,000,000 tokens (18 decimals).
 //!     - `INITIAL_SUPPLY` = 10,000,000 tokens (18 decimals), minted in
 //!       the constructor.
-//!   Reward mints go through `_mint_from_budget` (monthly cap) then
-//!   `_mint_capped` against MAX_SUPPLY.
+//!   Reward mints go through `_mint_from_budget`, which enforces the monthly
+//!   budget and `MAX_SUPPLY` headroom before minting directly through ERC20.
 //!
 //!   ADMIN TIMELOCK
 //!   ----------------
@@ -167,172 +168,460 @@ pub mod utils;
 #[starknet::interface]
 pub trait IStakeholderConviction<TContractState> {
     // ---- juror staking (Kleros side) ----
+
+    /// Adds `amount` of the contract's ERC20 to the caller's juror stake.
+    /// The caller must approve this contract before invoking the method.
+    ///
+    /// The amount is added to the Fenwick selection tree and `Staked` is emitted.
+    /// Reverts for a zero amount, a failed transfer, or exhausted tree capacity.
     fn stake(ref self: TContractState, amount: u256);
+
+    /// Withdraws `amount` from the caller's currently unlocked juror stake.
+    /// Stake locked by open disputes cannot be withdrawn.
+    ///
+    /// The amount is removed from the Fenwick tree, transferred back to the
+    /// caller, and reported through `Unstaked`. Reverts when the caller's
+    /// total or unlocked stake is insufficient or no index is registered.
     fn unstake(ref self: TContractState, amount: u256);
 
     // ---- stakeholder selection (Kleros dispute lifecycle) ----
+
+    /// Opens a bonded selection dispute for the caller and returns its ID.
+    /// Evidence must be non-empty and no longer than `MAX_EVIDENCE_LEN`.
+    /// The caller must approve the current evaluation bond; a verified VRF
+    /// random value must be supplied in the same multicall before this call.
+    /// The draw seed is the Poseidon hash of that VRF value and a recent
+    /// on-chain block hash read directly by the contract.
+    ///
+    /// The contract records the dispute, draws weighted jurors with replacement,
+    /// snapshots their stakes into dispute locks, and emits `DisputeCreated`,
+    /// `EvaluationRequested`, and one `JurorDrawn` event per draw. Reverts for
+    /// an active dispute, invalid evidence, failed bond transfer, no staked
+    /// weight, or exhausted redraw attempts..
     fn request_evaluation(ref self: TContractState, evidence: ByteArray) -> u256;
+
+    /// Stores a drawer's Poseidon commitment for a dispute vote.
+    /// The caller must be a drawn juror, the dispute must be in its commit
+    /// phase, and the commit deadline must not have passed. A juror may commit
+    /// only once. `VoteCommitted` is emitted on success.
     fn commit_vote(ref self: TContractState, dispute_id: u256, commit_hash: felt252);
+
+    /// Reveals a score in the inclusive range -5 through 5 for a committed vote.
+    /// The commitment must equal the Poseidon hash of `(score, salt)`, the
+    /// commit phase must have ended, and the reveal deadline must not have
+    /// passed. The caller's dispute stake lock is released exactly once.
     fn reveal_vote(ref self: TContractState, dispute_id: u256, score: i8, salt: felt252);
+
+    /// Reports a drawn juror who failed to reveal and applies the configured slash.
+    /// Anyone may call this after the reveal deadline. The reported juror must
+    /// not have revealed or been slashed already. A non-reporter may receive
+    /// the best-effort slash-keeper reward when the monthly budget permits.
     fn slash_non_revealer(
         ref self: TContractState, dispute_id: u256, juror: starknet::ContractAddress,
     );
+
+    /// Finalizes a dispute after its reveal deadline and stores its trimmed score.
+    /// The routine computes a stake-weighted mean, removes votes more than one
+    /// population standard deviation away, recomputes the mean, mints
+    /// governance tokens for positive scores, and settles the evaluation bond.
+    /// A dispute with no reveals settles at score zero and refunds its bond.
     fn finalize_selection(ref self: TContractState, dispute_id: u256);
+
+    /// Claims the caller's proportional share of a dispute's coherent-juror
+    /// slash pool. The dispute must be finalized, the caller coherent, and the
+    /// reward not previously claimed. The reward is transferred from escrow.
     fn claim_juror_reward(ref self: TContractState, dispute_id: u256);
 
     // ---- non-transferable governance tokens (Stage 2, decaying) ----
+
+    /// Returns the caller's current decayed governance-token balance.
+    /// The result is calculated from all bounded grant slots and includes
+    /// tokens currently locked in convictions until their grants decay.
     fn governance_balance(self: @TContractState, holder: starknet::ContractAddress) -> u256;
+
+    /// Returns the holder's decayed governance tokens not locked in convictions.
     fn governance_available(self: @TContractState, holder: starknet::ContractAddress) -> u256;
+
+    /// Returns the holder's governance-token amount currently locked by convictions.
     fn governance_locked(self: @TContractState, holder: starknet::ContractAddress) -> u256;
 
     // ---- score voting / proposal lifecycle ----
+
+    /// Creates a funding proposal and escrows the current reputation deposit.
+    /// The caller must approve the contract for the deposit. Evidence must be
+    /// non-empty and bounded. Returns the new proposal ID and emits
+    /// `ProposalCreated`.
     fn create_proposal(
         ref self: TContractState,
         funding_wallet: starknet::ContractAddress,
         evidence: ByteArray,
     ) -> u256;
+
+    /// Locks available governance tokens in a new level-1-through-10 conviction.
+    /// The lock duration is `level * conviction_base_lock` and may not exceed
+    /// `MAX_LOCK_DURATION`. Returns the per-owner conviction ID and emits
+    /// `ConvictionCreated`.
     fn create_conviction(ref self: TContractState, level: u8, amount: u256) -> u32;
+
+    /// Permanently records one score vote from a live conviction on a proposal.
+    /// The conviction must belong to the caller, remain inside its lock window,
+    /// have not voted on this proposal before, and remain below the configured
+    /// distinct-vote limit. The static weight is added to the score histogram
+    /// and the proposal's O(1) `power_total` accumulator.
     fn vote_with_conviction(
         ref self: TContractState, proposal_id: u256, conviction_id: u32, score: i8,
     );
+
+    /// Releases a conviction's governance stake after its lock window ends.
+    /// Votes already cast remain permanent and continue contributing their
+    /// frozen weight. A conviction cannot be released twice.
     fn release_conviction(ref self: TContractState, conviction_id: u32);
+
+    /// Executes a proposal once its frozen voting power reaches the threshold.
+    /// Non-negative scores refund the author's deposit and may mint a
+    /// best-effort score reward; negative scores slash the deposit. The
+    /// operation always reaches settlement even when reward budget or supply
+    /// headroom is insufficient.
     fn execute_proposal(ref self: TContractState, proposal_id: u256);
 
+    /// Returns the static vote weight of a conviction after its first vote.
+    /// A conviction with no recorded votes reports zero power.
     fn get_conviction_power(
         self: @TContractState, owner: starknet::ContractAddress, conviction_id: u32,
     ) -> u256;
+
+    /// Returns a proposal's frozen accumulated voting power in O(1).
     fn get_proposal_total_power(self: @TContractState, proposal_id: u256) -> u256;
 
     // ---- this contract's own ERC20 ----
+
+    /// Returns the protocol's hard ERC20 supply cap.
     fn token_max_supply(self: @TContractState) -> u256;
+
+    /// Returns the amount that can still be minted under the supply cap.
     fn token_remaining_mintable(self: @TContractState) -> u256;
+
+    /// Burns `amount` of the caller's ERC20 and records it for next-month recycling.
+    /// Reverts for a zero amount or insufficient caller balance.
     fn burn(ref self: TContractState, amount: u256);
 
     // ---- monthly inflation / burn-recycling budget ----
+
+    /// Returns the currently stored month index; rollover is lazy and may lag
+    /// wall-clock time until a state-changing operation calls the month engine.
     fn get_current_month(self: @TContractState) -> u64;
+
+    /// Returns the stored timestamp at which the current month began.
     fn get_month_start(self: @TContractState) -> u64;
+
+    /// Returns the total budget recorded for a month.
     fn get_month_budget(self: @TContractState, month: u64) -> u256;
+
+    /// Returns the amount of a month's budget already consumed by rewards.
     fn get_month_budget_minted(self: @TContractState, month: u64) -> u256;
+
+    /// Returns the ERC20 burn amount recorded for a month.
     fn get_month_burned(self: @TContractState, month: u64) -> u256;
+
+    /// Returns the currently stored month's unconsumed budget without forcing
+    /// month rollover.
     fn get_remaining_month_budget(self: @TContractState) -> u256;
+
+    /// Returns the configured monthly inflation rate in basis points.
     fn get_inflation_rate_bps(self: @TContractState) -> u16;
 
     // ---- ERC20 balance decay ----
+
+    /// Applies elapsed-time decay to one unprotected ERC20 balance.
+    /// Decay is recorded in whole hours, burns at most the configured rate,
+    /// and may reward a different caller when the minimum threshold and
+    /// cooldown are satisfied. Reverts for a protected address.
     fn apply_decay(ref self: TContractState, user: starknet::ContractAddress);
+
+    /// Applies decay to at most `MAX_BATCH_DECAY` addresses in array order.
+    /// Addresses marked in the timelocked protection map are skipped; the
+    /// contract's own escrow address is intrinsically rejected by the internal
+    /// decay path. All other addresses are processed under one reentrancy guard.
     fn batch_apply_decay(ref self: TContractState, users: Array<starknet::ContractAddress>);
+
+    /// Returns the configured hourly decay rate in basis points.
     fn get_decay_rate_bps(self: @TContractState) -> u16;
+
+    /// Returns the minimum burned amount required for a caller reward.
     fn get_min_decay_for_reward(self: @TContractState) -> u256;
+
+    /// Returns the configured decay caller reward amount.
     fn get_caller_reward_amount(self: @TContractState) -> u256;
+
+    /// Returns the timestamp at which an address was last decay-accounted.
     fn get_last_decay_at(self: @TContractState, user: starknet::ContractAddress) -> u64;
+
+    /// Reports the configured protection flag for an address. The contract's
+    /// own escrow address is also intrinsically protected by the decay helper,
+    /// even when this separately stored flag is false.
     fn is_protected_address(self: @TContractState, user: starknet::ContractAddress) -> bool;
 
-    // ---- juror stake locking views ----
+    // ---- juror stake-locking views ----
+
+    /// Returns the sum of juror stake snapshots locked by open disputes.
     fn get_juror_locked_stake(
         self: @TContractState, juror: starknet::ContractAddress,
     ) -> u256;
+
+    /// Returns the portion of a juror's stake not locked by open disputes.
     fn get_juror_unlocked_stake(
         self: @TContractState, juror: starknet::ContractAddress,
     ) -> u256;
+
+    /// Returns the number of open disputes currently locking a juror.
     fn get_juror_open_dispute_count(
         self: @TContractState, juror: starknet::ContractAddress,
     ) -> u32;
 
     // ---- opt-in evaluation bond views ----
+
+    /// Returns the current evaluation bond required to request a dispute.
     fn get_evaluation_bond_amount(self: @TContractState) -> u256;
+
+    /// Returns the stored active-dispute ID for a candidate. Because dispute
+    /// IDs start at zero, a returned zero is ambiguous: it can mean no active
+    /// dispute or the first dispute ID.
     fn get_active_dispute_for_candidate(
         self: @TContractState, candidate: starknet::ContractAddress,
     ) -> u256;
+
+    /// Returns the evidence bytes stored for a dispute.
     fn get_dispute_evidence(self: @TContractState, dispute_id: u256) -> ByteArray;
 
     // ---- admin: timelocked parameter changes ----
+
+    /// Proposes a new evaluation bond. Only the default admin may call it; the
+    /// amount must be positive and no greater than `MAX_SUPPLY`. The change
+    /// becomes executable after `TIMELOCK_DURATION`.
     fn propose_set_evaluation_bond_amount(ref self: TContractState, amount: u256);
+
+    /// Executes the pending evaluation-bond change after its timelock.
     fn execute_set_evaluation_bond_amount(ref self: TContractState);
+
+    /// Proposes a new proposal reputation deposit, subject to the same admin
+    /// authorization, positive-value check, supply cap, and three-day timelock.
     fn propose_set_reputation_stake(ref self: TContractState, amount: u256);
+
+    /// Executes the pending reputation-deposit change after its timelock.
     fn execute_set_reputation_stake(ref self: TContractState);
+
+    /// Proposes the minimum proposal voting power required for execution.
+    /// The threshold must be positive and no greater than `MAX_SUPPLY`.
     fn propose_set_conviction_threshold(ref self: TContractState, threshold: u256);
+
+    /// Executes the pending conviction-threshold change after its timelock.
     fn execute_set_conviction_threshold(ref self: TContractState);
+
+    /// Proposes the reward multiplier for final scores 4 through 5.
     fn propose_set_reward_multiplier(ref self: TContractState, amount: u256);
+
+    /// Executes the pending score-4-to-5 reward multiplier after its timelock.
     fn execute_set_reward_multiplier(ref self: TContractState);
+
+    /// Proposes the reward multiplier for final scores 1 through 3.
     fn propose_set_mini_reward_multiplier(ref self: TContractState, amount: u256);
+
+    /// Executes the pending score-1-to-3 reward multiplier after its timelock.
     fn execute_set_mini_reward_multiplier(ref self: TContractState);
+
+    /// Proposes a non-zero Cartridge VRF provider address.
+    /// The address is encoded as a felt value and becomes active after the
+    /// ordinary administrative timelock.
     fn propose_set_vrf_provider(
         ref self: TContractState, new_vrf_provider: starknet::ContractAddress,
     );
+
+    /// Executes the pending VRF provider change after its timelock.
     fn execute_set_vrf_provider(ref self: TContractState);
+
+    /// Proposes a positive commitment-phase duration in seconds.
     fn propose_set_commit_duration(ref self: TContractState, commit_duration: u64);
+
+    /// Executes the pending commitment-duration change after its timelock.
     fn execute_set_commit_duration(ref self: TContractState);
+
+    /// Proposes a positive reveal-phase duration in seconds.
     fn propose_set_reveal_duration(ref self: TContractState, reveal_duration: u64);
+
+    /// Executes the pending reveal-duration change after its timelock.
     fn execute_set_reveal_duration(ref self: TContractState);
+
+    /// Proposes the non-reveal slash rate in basis points, from zero through
+    /// 10,000 (one hundred percent).
     fn propose_set_non_reveal_slash_bps(ref self: TContractState, bps: u16);
+
+    /// Executes the pending non-reveal slash-rate change after its timelock.
     fn execute_set_non_reveal_slash_bps(ref self: TContractState);
+
+    /// Proposes the ERC20 decay rate in basis points, from zero through 10,000.
     fn propose_set_decay_rate_bps(ref self: TContractState, bps: u16);
+
+    /// Executes the pending ERC20 decay-rate change after its timelock.
     fn execute_set_decay_rate_bps(ref self: TContractState);
+
+    /// Proposes the minimum decay amount for a caller reward, capped at
+    /// `MAX_SUPPLY`; zero disables the effective minimum.
     fn propose_set_min_decay_for_reward(ref self: TContractState, amount: u256);
+
+    /// Executes the pending minimum-decay threshold after its timelock.
     fn execute_set_min_decay_for_reward(ref self: TContractState);
+
+    /// Proposes the decay caller reward amount, capped at `MAX_SUPPLY`; zero
+    /// disables the reward mint.
     fn propose_set_caller_reward_amount(ref self: TContractState, amount: u256);
+
+    /// Executes the pending decay caller reward after its timelock.
     fn execute_set_caller_reward_amount(ref self: TContractState);
+
+    /// Proposes the juror draw count between `MIN_NUM_DRAWS` and
+    /// `MAX_NUM_DRAWS`, using the ordinary administrative timelock.
     fn propose_set_num_draws(ref self: TContractState, num_draws: u32);
+
+    /// Executes the pending juror draw-count change after its timelock.
     fn execute_set_num_draws(ref self: TContractState);
+
+    /// Returns the current configured juror draw count.
     fn get_num_draws(self: @TContractState) -> u32;
+
+    /// Proposes the per-level conviction base lock in seconds. The value must
+    /// be positive and no greater than `MAX_LOCK_DURATION`.
     fn propose_set_conviction_base_lock(ref self: TContractState, lock_duration: u64);
+
+    /// Executes the pending conviction base-lock change after its timelock.
     fn execute_set_conviction_base_lock(ref self: TContractState);
+
+    /// Returns the current per-level conviction base lock in seconds.
     fn get_conviction_base_lock(self: @TContractState) -> u64;
+
+    /// Proposes the maximum number of distinct proposals one conviction may
+    /// vote on. The value must be positive and no greater than
+    /// `MAX_MAX_VOTES_PER_CONVICTION`.
     fn propose_set_max_votes_per_conviction(ref self: TContractState, max_votes: u64);
+
+    /// Executes the pending per-conviction vote-limit change after its timelock.
     fn execute_set_max_votes_per_conviction(ref self: TContractState);
+
+    /// Returns the current distinct-proposal vote limit per conviction.
     fn get_max_votes_per_conviction(self: @TContractState) -> u64;
+
+    /// Proposes the monthly inflation rate in basis points, up to
+    /// `MAX_INFLATION_BPS`.
     fn propose_set_inflation_rate_bps(ref self: TContractState, bps: u16);
+
+    /// Executes the pending monthly inflation-rate change after its timelock.
     fn execute_set_inflation_rate_bps(ref self: TContractState);
+
+    /// Proposes a timelocked protected-address flag change. Only the default
+    /// admin may call it, the target must be non-zero, and the change becomes
+    /// executable after `TIMELOCK_DURATION`.
     fn propose_set_protected_address(
         ref self: TContractState,
         target: starknet::ContractAddress,
         protected: bool,
     );
+
+    /// Executes a pending protected-address change after its timelock.
     fn execute_set_protected_address(
         ref self: TContractState, target: starknet::ContractAddress,
     );
+
+    /// Returns the pending ordinary parameter-change record for `param_key`.
     fn get_pending_change(
         self: @TContractState, param_key: felt252,
     ) -> StakeholderConviction::PendingChange;
+
+    /// Returns the pending protected-address change record for `target`.
     fn get_pending_protected(
         self: @TContractState, target: starknet::ContractAddress,
     ) -> StakeholderConviction::PendingProtectedChange;
 
     // ---- admin roster (timelocked) ----
+
+    /// Proposes adding a non-zero address to the admin roster. The current
+    /// default admin must authorize the proposal, and it becomes executable
+    /// after `TIMELOCK_DURATION`.
     fn propose_add_admin(ref self: TContractState, new_admin: starknet::ContractAddress);
+
+    /// Executes a pending admin addition after its timelock. The address must
+    /// still not be an admin when execution occurs.
     fn execute_add_admin(ref self: TContractState, new_admin: starknet::ContractAddress);
+
+    /// Proposes removing an existing admin from the roster after the ordinary
+    /// administrative timelock.
     fn propose_remove_admin(
         ref self: TContractState, admin_to_remove: starknet::ContractAddress,
     );
+
+    /// Executes a pending admin removal after its timelock. The last remaining
+    /// admin cannot be removed.
     fn execute_remove_admin(
         ref self: TContractState, admin_to_remove: starknet::ContractAddress,
     );
+
+    /// Returns the pending admin-roster change for an address.
     fn get_pending_admin_change(
         self: @TContractState, target: starknet::ContractAddress,
     ) -> StakeholderConviction::PendingAdminChange;
+
+    /// Returns the number of addresses in the admin roster.
     fn admin_count(self: @TContractState) -> u32;
 
     // ---- upgradeability ----
+
+    /// Proposes a non-zero class-hash upgrade. Only the default admin may
+    /// propose it, upgrades must not already be disabled, and execution waits
+    /// for `UPGRADE_TIMELOCK_DURATION`.
     fn propose_upgrade(ref self: TContractState, new_class_hash: starknet::ClassHash);
+
+    /// Executes a pending class-hash upgrade after its seven-day timelock.
     fn execute_upgrade(ref self: TContractState);
+
+    /// Proposes permanently disabling all future upgrades. The irreversible
+    /// change waits for `UPGRADE_TIMELOCK_DURATION` and can have only one
+    /// pending proposal at a time.
     fn propose_disable_upgrades(ref self: TContractState);
+
+    /// Executes the pending permanent upgrade-disabling change after its
+    /// seven-day timelock and clears any pending class-hash upgrade.
     fn execute_disable_upgrades(ref self: TContractState);
+
+    /// Reports whether the upgrade path has been permanently disabled.
     fn is_upgrades_disabled(self: @TContractState) -> bool;
+
+    /// Returns the pending class-hash upgrade record.
     fn get_pending_upgrade(
         self: @TContractState,
     ) -> StakeholderConviction::PendingUpgrade;
+
+    /// Returns the pending permanent-upgrade-disabling record.
     fn get_pending_upgrade_disable(
         self: @TContractState,
     ) -> StakeholderConviction::PendingChange;
 
     // ---- views ----
+
+    /// Returns the stored selection-dispute record for `dispute_id`.
     fn get_dispute(self: @TContractState, dispute_id: u256) -> StakeholderConviction::Dispute;
+
+    /// Returns the stored funding-proposal record for `proposal_id`.
     fn get_proposal(
         self: @TContractState, proposal_id: u256,
     ) -> StakeholderConviction::FundingProposal;
+
+    /// Returns a conviction record by owner and per-owner ID.
     fn get_conviction(
         self: @TContractState, owner: starknet::ContractAddress, id: u32,
     ) -> StakeholderConviction::Conviction;
+
+    /// Returns a juror's total transferable-token stake.
     fn get_juror_stake(self: @TContractState, juror: starknet::ContractAddress) -> u256;
+
+    /// Returns the total weighted stake represented in the Fenwick tree.
     fn total_stake_weight(self: @TContractState) -> u256;
 }
 
@@ -342,8 +631,10 @@ pub mod StakeholderConviction {
     use core::num::traits::Zero;
     use core::poseidon::poseidon_hash_span;
     use starknet::{
-        ContractAddress, ClassHash, get_caller_address, get_block_timestamp, get_contract_address,
+        ContractAddress, ClassHash, get_caller_address, get_block_timestamp, get_block_number,
+        get_contract_address,
     };
+    use starknet::syscalls::get_block_hash_syscall;
     use starknet::storage::{
         Map, StoragePathEntry, StoragePointerReadAccess, StoragePointerWriteAccess,
     };
@@ -409,106 +700,187 @@ pub mod StakeholderConviction {
 
     #[storage]
     struct Storage {
+        /// ERC20 balances, allowances, supply, and token metadata.
         #[substorage(v0)]
         erc20: ERC20Component::Storage,
+        /// Internal role membership used by the timelocked admin paths.
         #[substorage(v0)]
         accesscontrol: AccessControlComponent::Storage,
+        /// SRC5 interface-support state.
         #[substorage(v0)]
         src5: SRC5Component::Storage,
+        /// Reentrancy lock state for state-changing contract operations.
         #[substorage(v0)]
         reentrancyguard: ReentrancyGuardComponent::Storage,
+        /// Cartridge VRF provider and pending randomness state.
         #[substorage(v0)]
         vrf_consumer: VrfConsumerComponent::Storage,
+        /// Upgradeable contract implementation state.
         #[substorage(v0)]
         upgradeable: UpgradeableComponent::Storage,
 
+        /// Pending class-hash upgrade and its execution timestamp.
         pending_upgrade: PendingUpgrade,
+        /// Pending irreversible upgrade-disabling change.
         pending_upgrade_disable: PendingChange,
+        /// Whether the class-hash upgrade path has been permanently disabled.
         upgrades_disabled: bool,
 
+        /// Duration of the juror commitment phase in seconds.
         commit_duration: u64,
+        /// Duration of the juror reveal phase in seconds.
         reveal_duration: u64,
+        /// Fraction of a non-revealing juror's stake to slash, in basis points.
         non_reveal_slash_bps: u16,
 
         // ---- timelocked admin parameters ----
+
+        /// ERC20 bond required to request candidate evaluation.
         evaluation_bond_amount: u256,
+        /// ERC20 reputation deposit required to create a proposal.
         reputation_stake: u256,
+        /// Minimum frozen proposal power required for execution.
         conviction_threshold: u256,
+        /// Multiplier for positive final scores 4 through 5.
         reward_multiplier: u256,
+        /// Multiplier for positive final scores 1 through 3.
         mini_reward_multiplier: u256,
+        /// Number of weighted draws requested per evaluation dispute.
         num_draws: u32,
 
         // ---- staking / Fenwick tree ----
+
+        /// Maximum number of juror slots in the selection tree.
         tree_size: u32,
+        /// Highest juror slot allocated so far.
         next_index: u32,
+        /// Reverse mapping from juror address to Fenwick slot.
         juror_index: Map<ContractAddress, u32>,
+        /// Forward mapping from Fenwick slot to juror address.
         index_juror: Map<u32, ContractAddress>,
+        /// Fenwick tree cells containing weighted juror stake.
         fenwick_tree: Map<u32, u256>,
+        /// Total transferable-token stake registered for each juror.
         juror_stake: Map<ContractAddress, u256>,
 
         // ---- juror stake locking ----
+
+        /// Sum of stake snapshots currently locked by a juror's open disputes.
         juror_locked_total: Map<ContractAddress, u256>,
+        /// Number of open disputes contributing to a juror's lock.
         juror_open_lock_count: Map<ContractAddress, u32>,
+        /// Stake snapshot captured when a juror is first drawn into a dispute.
         dispute_juror_locked_snapshot: Map<(u256, ContractAddress), u256>,
+        /// Whether a dispute-specific juror lock has already been released.
         dispute_juror_lock_released: Map<(u256, ContractAddress), bool>,
 
         // ---- selection disputes ----
+
+        /// Number of evaluation disputes ever created.
         dispute_count: u256,
+        /// Durable lifecycle state indexed by dispute ID.
         disputes: Map<u256, Dispute>,
+        /// Number of times each juror was drawn into a dispute.
         dispute_juror_draws: Map<(u256, ContractAddress), u32>,
+        /// Deduplicated juror list used by finalization loops.
         dispute_juror_list: Map<(u256, u32), ContractAddress>,
+        /// Poseidon commitment stored for each dispute juror.
         dispute_commit: Map<(u256, ContractAddress), felt252>,
+        /// Whether each dispute juror has committed a vote.
         dispute_committed: Map<(u256, ContractAddress), bool>,
+        /// Whether each dispute juror has revealed a vote.
         dispute_revealed: Map<(u256, ContractAddress), bool>,
+        /// Revealed score for each dispute juror.
         dispute_score: Map<(u256, ContractAddress), i8>,
+        /// Whether each revealed juror is coherent with the final score.
         dispute_coherent: Map<(u256, ContractAddress), bool>,
+        /// Whether each non-revealing juror has been slashed.
         dispute_slashed: Map<(u256, ContractAddress), bool>,
+        /// Whether each coherent juror has claimed the slash-pool reward.
         dispute_reward_claimed: Map<(u256, ContractAddress), bool>,
 
         // ---- opt-in evaluation bond ----
+
+        /// Candidate-supplied evidence for each dispute.
         dispute_evidence: Map<u256, ByteArray>,
+        /// Whether a candidate currently has an unresolved evaluation dispute.
         has_active_dispute: Map<ContractAddress, bool>,
+        /// Stored active-dispute ID for each candidate.
         active_dispute_for_candidate: Map<ContractAddress, u256>,
 
         // ---- non-transferable governance tokens ----
+
+        /// Number of grant slots allocated for each holder.
         governance_next_grant: Map<ContractAddress, u32>,
+        /// Grant records indexed by holder and bounded slot number.
         governance_grant: Map<(ContractAddress, u32), Grant>,
+        /// Sum of governance tokens locked by live convictions.
         governance_locked_total: Map<ContractAddress, u256>,
 
         // ---- score voting / convictions ----
+
+        /// Next per-owner conviction identifier.
         next_conviction_id: Map<ContractAddress, u32>,
+        /// Conviction records indexed by owner and identifier.
         convictions: Map<(ContractAddress, u32), Conviction>,
+        /// Permanent one-vote marker for owner, conviction, and proposal.
         conviction_voted_on: Map<(ContractAddress, u32, u256), bool>,
+        /// Current per-level conviction lock duration in seconds.
         conviction_base_lock: u64,
+        /// Current maximum distinct proposals per conviction.
         max_votes_per_conviction: u64,
 
         // ---- proposals ----
+
+        /// Number of funding proposals ever created.
         proposal_count: u256,
+        /// Funding proposal records indexed by proposal ID.
         proposals: Map<u256, FundingProposal>,
+        /// Weighted score histogram indexed by proposal and score bucket.
         proposal_score_counts: Map<(u256, u8), u256>,
 
         // ---- ERC20 balance decay ----
+
+        /// Hourly ERC20 balance-decay rate in basis points.
         decay_rate_bps: u16,
+        /// Minimum decay amount eligible for a caller reward.
         min_decay_for_reward: u256,
+        /// Reward amount for a qualifying external decay caller.
         caller_reward_amount: u256,
+        /// Last timestamp at which each user's balance was decay-accounted.
         last_decay_at: Map<ContractAddress, u64>,
+        /// Last timestamp at which each caller earned a decay reward.
         last_caller_reward_at: Map<ContractAddress, u64>,
+        /// Addresses excluded from single-address decay.
         is_protected: Map<ContractAddress, bool>,
 
         // ---- timelock engine ----
+
+        /// Pending ordinary parameter changes keyed by parameter felt.
         pending_changes: Map<felt252, PendingChange>,
+        /// Pending protected-address changes keyed by target address.
         pending_protected: Map<ContractAddress, PendingProtectedChange>,
 
         // ---- admin roster ----
+
+        /// Pending admin additions/removals keyed by target address.
         pending_admin_changes: Map<ContractAddress, PendingAdminChange>,
+        /// Current number of default admins.
         admin_count: u32,
 
         // ---- monthly inflation / burn-recycling budget ----
+
+        /// Monthly inflation rate in basis points.
         inflation_rate_bps: u16,
+        /// Timestamp at which the currently stored month began.
         month_start: u64,
+        /// Index of the currently stored budget month.
         month_index: u64,
+        /// Total budget allocated to each month.
         month_budget: Map<u64, u256>,
+        /// Budget consumed by rewards in each month.
         month_minted: Map<u64, u256>,
+        /// ERC20 burns recorded for recycling into each month's successor.
         month_burned: Map<u64, u256>,
     }
 
@@ -577,6 +949,14 @@ pub mod StakeholderConviction {
                             // CONSTRUCTOR
     // //////////////////////////////////////////////////////////////
 
+    /// Initializes the token, access-control, VRF, staking, admin, and budget state.
+    ///
+    /// The constructor validates all non-zero address and amount inputs, grants
+    /// the initial default-admin role to `admin`, initializes the Fenwick tree
+    /// capacity, writes protocol defaults, mints `INITIAL_SUPPLY` once to
+    /// `initial_recipient`, and creates month zero's inflation-only budget.
+    /// Construction reverts for zero addresses, zero economic parameters, or a
+    /// zero tree capacity.
     #[constructor]
     fn constructor(
         ref self: ContractState,
@@ -755,9 +1135,15 @@ pub mod StakeholderConviction {
             self.emit(DisputeCreated { dispute_id, candidate, num_draws });
             self.emit(EvaluationRequested { dispute_id, candidate, bond_amount });
 
-            let base_seed: felt252 = self
+            let vrf_seed: felt252 = self
                 .vrf_consumer
                 .consume_random(Source::Nonce(get_contract_address()));
+            let block_hash = self._recent_block_hash();
+
+            let mut seed_input: Array<felt252> = ArrayTrait::new();
+            seed_input.append(vrf_seed);
+            seed_input.append(block_hash);
+            let base_seed: felt252 = poseidon_hash_span(seed_input.span());
 
             let mut unique_juror_count: u32 = 0;
             let mut i: u32 = 0;
@@ -1274,7 +1660,7 @@ pub mod StakeholderConviction {
             assert(get_block_timestamp() < lock_expiry, 'LockExpired');
             assert(c.votes_cast < self.max_votes_per_conviction.read(), 'MaxVotesReached');
 
-            // Weight is STATIC (frozen at vote time): level * isqrt(amount)
+            // Weight is STATIC (frozen at vote time): isqrt(level * amount)
             let weight = self._vote_weight(@c);
 
             // Bucket the score and bump the proposal's frozen power accumulator
@@ -1296,7 +1682,7 @@ pub mod StakeholderConviction {
 
         fn release_conviction(ref self: ContractState, conviction_id: u32) {
             self.reentrancyguard.start();
-            let caller = get_caller_address();
+let caller = get_caller_address();
             let mut c = self.convictions.entry((caller, conviction_id)).read();
             assert(c.owner == caller, 'Unauthorized');
             assert(!c.released, 'AlreadyReleased');
@@ -1970,6 +2356,29 @@ pub mod StakeholderConviction {
 
     #[generate_trait]
     impl InternalImpl of InternalTrait {
+
+
+    /// Returns the hash of the most recent block old enough for Starknet
+    /// to expose via syscall, or zero on a chain younger than
+    /// `BLOCK_HASH_LOOKBACK` blocks. Mixed into the VRF seed so that the
+    /// draw seed always includes a component the contract reads itself,
+    /// rather than depending solely on values an external VRF provider
+    /// supplies and could in principle withhold.
+    fn _recent_block_hash(self: @ContractState) -> felt252 {
+        let current = get_block_number();
+        if current < BLOCK_HASH_LOOKBACK {
+            return 0;
+        }
+        let target = current - BLOCK_HASH_LOOKBACK;
+        match get_block_hash_syscall(target) {
+            Result::Ok(hash) => hash,
+            Result::Err(_) => 0,
+        }
+    }
+        /// Mints ERC20 tokens after enforcing the global supply cap.
+        /// This helper is used for the one-time constructor mint; budgeted
+        /// rewards use `_mint_from_budget`, which performs its own checks and
+        /// remains best-effort.
         fn _mint_capped(ref self: ContractState, to: ContractAddress, amount: u256) {
             assert(amount > 0, 'ZeroAmount');
             let current_supply = self.erc20.total_supply();
@@ -1979,6 +2388,9 @@ pub mod StakeholderConviction {
 
         // ---- monthly inflation / burn-recycling budget ----
 
+        /// Computes a month's inflation share plus burns recycled from the
+        /// previous month. Inflation is capped by the remaining `MAX_SUPPLY`
+        /// headroom; month zero has no recycled burn component.
         fn _compute_month_budget(self: @ContractState, month: u64) -> u256 {
             let recycle = if month == 0 {
                 0
@@ -1998,6 +2410,11 @@ pub mod StakeholderConviction {
             inflation_part + recycle
         }
 
+        /// Advances stale monthly budget state up to `MAX_ROLLOVER_MONTHS`
+        /// months in one call. Each closed month's unused budget is written
+        /// off, then the next month's inflation and recycled-burn budget is
+        /// initialized and emitted. A far-future timestamp is intentionally
+        /// clamped rather than reverted, so repeated calls can catch up.
         fn _ensure_current_month(ref self: ContractState) {
             let now = get_block_timestamp();
             let mut start = self.month_start.read();
@@ -2051,11 +2468,12 @@ pub mod StakeholderConviction {
             self.month_start.write(start);
         }
 
-        /// Mint a reward from the current month's budget. Best-effort: returns
-        /// `true` only when actually minted, `false` (never reverts) when the
-        /// month budget or MAX_SUPPLY headroom is insufficient, so that the
-        /// calling operation (slash, decay, proposal execution) is never
-        /// blocked by reward availability.
+        /// Attempts to mint a reward from the current month's budget.
+        ///
+        /// The result is `true` only when tokens are actually minted. A zero
+        /// amount, exhausted monthly budget, or insufficient `MAX_SUPPLY`
+        /// headroom returns `false` without reverting, allowing the enclosing
+        /// slash, decay, or proposal operation to complete without its reward.
         fn _mint_from_budget(ref self: ContractState, to: ContractAddress, amount: u256) -> bool {
             if amount == 0 {
                 return false;
@@ -2078,6 +2496,9 @@ pub mod StakeholderConviction {
             true
         }
 
+        /// Records an ERC20 burn in the current month after lazily advancing
+        /// month state. The recorded amount is available as recycled budget
+        /// when the following month is initialized.
         fn _track_burn(ref self: ContractState, amount: u256) {
             assert(amount > 0, 'ZeroAmount');
             self._ensure_current_month();
@@ -2089,6 +2510,9 @@ pub mod StakeholderConviction {
 
         // ---- juror slot registry ----
 
+        /// Returns a juror's existing Fenwick slot or allocates the next slot.
+        /// Allocation is bounded by the configured tree capacity and updates
+        /// both forward and reverse slot mappings.
         fn _get_or_create_index(ref self: ContractState, juror: ContractAddress) -> u32 {
             let existing = self.juror_index.entry(juror).read();
             if existing != 0 {
@@ -2104,6 +2528,9 @@ pub mod StakeholderConviction {
 
         // ---- Fenwick tree ----
 
+        /// Adds `amount` to a Fenwick slot and every aggregate cell covering it.
+        /// The slot must be within the configured tree size; callers obtain valid
+        /// slots through `_get_or_create_index`.
         fn _fenwick_add(ref self: ContractState, index: u32, amount: u256) {
             let size = self.tree_size.read();
             let mut i = index;
@@ -2117,6 +2544,9 @@ pub mod StakeholderConviction {
             };
         }
 
+        /// Subtracts `amount` from a Fenwick slot and its aggregate cells.
+        /// Every affected cell must contain at least `amount`; otherwise the
+        /// helper reverts with `FenwickUnderflow` rather than corrupting totals.
         fn _fenwick_sub(ref self: ContractState, index: u32, amount: u256) {
             let size = self.tree_size.read();
             let mut i = index;
@@ -2131,6 +2561,8 @@ pub mod StakeholderConviction {
             };
         }
 
+        /// Computes the total weighted stake in slots one through `index`.
+        /// The loop follows Fenwick low bits and returns zero for index zero.
         fn _fenwick_prefix_sum(self: @ContractState, index: u32) -> u256 {
             let mut sum: u256 = 0;
             let mut i = index;
@@ -2144,10 +2576,14 @@ pub mod StakeholderConviction {
             sum
         }
 
+        /// Returns the total weighted stake represented by the entire tree.
         fn _fenwick_total(self: @ContractState) -> u256 {
             self._fenwick_prefix_sum(self.tree_size.read())
         }
 
+        /// Finds the first slot whose cumulative weight exceeds `target`.
+        /// The binary Fenwick search is bounded by the tree height; callers
+        /// must supply a target below the tree's total weight.
         fn _fenwick_find(self: @ContractState, target: u256) -> u32 {
             let size = self.tree_size.read();
             let mut log_size: u32 = 1;
@@ -2180,6 +2616,10 @@ pub mod StakeholderConviction {
 
         // ---- non-transferable governance token accounting ----
 
+        /// Adds a non-transferable governance grant using the first reusable
+        /// fully decayed slot, then an unused slot, or finally the most-decayed
+        /// slot when the per-holder cap is reached. The bounded slot count keeps
+        /// governance balance reads finite.
         fn _mint_governance_tokens(
             ref self: ContractState, holder: ContractAddress, amount: u256,
         ) {
@@ -2203,7 +2643,8 @@ pub mod StakeholderConviction {
             }
         }
 
-        /// First index whose grant has fully decayed to zero, else `count`.
+        /// Returns the first grant slot whose amount has fully decayed to zero,
+        /// or the current slot count when no reusable slot exists.
         fn _next_free_grant_slot(self: @ContractState, holder: ContractAddress) -> u32 {
             let count = self.governance_next_grant.entry(holder).read();
             let mut i: u32 = 0;
@@ -2220,6 +2661,9 @@ pub mod StakeholderConviction {
             count
         }
 
+        /// Replaces the grant with the smallest currently remaining decayed
+        /// amount. This is the fallback when all `MAX_GOV_GRANTS_PER_HOLDER`
+        /// slots are occupied by non-zero grants.
         fn _overwrite_most_decayed_grant(
             ref self: ContractState, holder: ContractAddress, amount: u256,
         ) {
@@ -2246,6 +2690,10 @@ pub mod StakeholderConviction {
                 .write(Grant { amount, minted_at: get_block_timestamp() });
         }
 
+        /// Computes one grant's remaining amount at the current timestamp.
+        /// Decay is linear over 8,760 whole hours; a grant reaches zero at or
+        /// after one year, and timestamps at or before mint time return the
+        /// original amount.
         fn _decayed_grant_amount(self: @ContractState, grant: @Grant) -> u256 {
             let now = get_block_timestamp();
             if now <= *grant.minted_at {
@@ -2260,6 +2708,8 @@ pub mod StakeholderConviction {
             amount - (amount * hours_elapsed.into() / HOURS_PER_YEAR.into())
         }
 
+        /// Sums the current decayed amounts across a holder's bounded grant
+        /// array. No grant is physically swept; decay is recomputed on each read.
         fn _decayed_total(self: @ContractState, holder: ContractAddress) -> u256 {
             let count = self.governance_next_grant.entry(holder).read();
             let mut total: u256 = 0;
@@ -2277,16 +2727,19 @@ pub mod StakeholderConviction {
 
         // ---- score voting power ----
 
-        /// weight = isqrt(level * locked_amount); STATIC, fixed at vote time
-        /// and frozen on the histogram + proposal `power_total`, so it never
-        /// drifts with elapsed lock time.
+        /// Computes a conviction's static vote weight as
+        /// `isqrt(level * locked_amount)`. The result is frozen when a vote is
+        /// cast and is not recalculated from elapsed lock time.
         fn _vote_weight(self: @ContractState, c: @Conviction) -> u256 {
             let level_u256: u256 = (*c.level).into();
             let amount_u256: u256 = (*c.amount).into();
             isqrt(level_u256 * amount_u256)
         }
 
-        /// Compute weighted score from the 11-bucket histogram.
+        /// Computes a proposal's final score from its eleven weighted score
+        /// buckets. Positive and negative weighted contributions are compared,
+        /// the magnitude is truncated toward zero, and the result is bounded to
+        /// the protocol's -5 through 5 range.
         fn _compute_weighted_score(self: @ContractState, proposal_id: u256) -> i64 {
             let mut weighted_pos: u256 = 0;
             let mut weighted_neg: u256 = 0;
@@ -2338,6 +2791,11 @@ pub mod StakeholderConviction {
 
         // ---- ERC20 balance decay ----
 
+        /// Applies elapsed-time ERC20 balance decay and optional caller reward.
+        /// Decay is charged in whole elapsed hours at the configured annual
+        /// basis-point rate, never exceeds the user's balance, and rejects the
+        /// contract's own escrow address. A reward is attempted only for a
+        /// different caller after the minimum burn and cooldown checks.
         fn _apply_decay(ref self: ContractState, user: ContractAddress) {
             // The contract's own escrow (locked juror stakes, evaluation bonds,
             // proposal deposits) must never be burnable via the public decay
@@ -2396,6 +2854,9 @@ pub mod StakeholderConviction {
 
         // ---- juror stake locking ----
 
+        /// Releases a dispute-specific juror stake snapshot exactly once.
+        /// A release marker prevents repeated reveal or slash calls from
+        /// decrementing the aggregate lock and open-dispute count twice.
         fn _release_dispute_lock(
             ref self: ContractState, dispute_id: u256, juror: ContractAddress,
         ) {
@@ -2416,6 +2877,8 @@ pub mod StakeholderConviction {
 
         // ---- generic timelock engine ----
 
+        /// Records an admin-authorized ordinary parameter change with a
+        /// three-day execution time and emits `ChangeProposed`.
         fn _propose_change(ref self: ContractState, param_key: felt252, new_value: u256) {
             self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
             let effective_at = get_block_timestamp() + TIMELOCK_DURATION;
@@ -2426,6 +2889,10 @@ pub mod StakeholderConviction {
             self.emit(ChangeProposed { param_key, new_value, effective_at });
         }
 
+        /// Consumes and returns a matured ordinary parameter change.
+        /// Only the default admin may execute it, the record must exist, and
+        /// the timelock must have elapsed; the pending record is cleared before
+        /// the value is returned.
         fn _execute_change(ref self: ContractState, param_key: felt252) -> u256 {
             self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
             let pc = self.pending_changes.entry(param_key).read();
@@ -2439,11 +2906,14 @@ pub mod StakeholderConviction {
             pc.new_value
         }
 
+        /// Encodes an address as a felt value for generic timelock storage.
         fn _address_to_u256(self: @ContractState, addr: ContractAddress) -> u256 {
             let addr_felt: felt252 = addr.into();
             addr_felt.into()
         }
 
+        /// Decodes a felt-encoded timelock value back to an address.
+        /// The value is expected to have been produced by `_address_to_u256`.
         fn _u256_to_address(self: @ContractState, value: u256) -> ContractAddress {
             let value_felt: felt252 = value.try_into().unwrap();
             value_felt.try_into().unwrap()

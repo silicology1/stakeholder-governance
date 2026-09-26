@@ -31,66 +31,107 @@ use stakeholder_governance::{
                         // SHARED TEST CONSTANTS
 // ////////////////////////////////////////////////////////////////
 
+/// One token expressed in the ERC20's 18-decimal base unit.
 const ONE: u256 = 1_000_000_000_000_000_000;
 
-// Constructor defaults used by most tests.
+/// Evaluation bond used by the standard test fixture.
 const BOND: u256 = 50 * ONE;
+/// Proposal deposit used by the standard test fixture.
 const DEPOSIT: u256 = 10 * ONE;
-const THRESHOLD: u256 = 1_000_000_000;   // cleared by one meaningful conviction
-const REWARD_MULT: u256 = 100 * ONE;        // used for scores 4-5
-const MINI_REWARD_MULT: u256 = 10 * ONE;    // used for scores 1-3
+/// Proposal execution threshold used by most tests.
+const THRESHOLD: u256 = 1_000_000_000;
+/// Full reward multiplier for scores four and five.
+const REWARD_MULT: u256 = 100 * ONE;
+/// Reduced reward multiplier for scores one through three.
+const MINI_REWARD_MULT: u256 = 10 * ONE;
 
+/// Juror stake used by the standard evaluation fixture.
 const STAKE: u256 = 100 * ONE;
+/// Number of distinct jurors used by the weighted multi-juror draw test.
+const JUROR_COUNT: u32 = 50;
+/// Token amount transferred to each fixture participant.
 const FUND: u256 = 1_000 * ONE;
 
+/// Base timestamp for deterministic phase transitions.
 const T0: u64 = 1_000_000;
+/// Timestamp at which the fixture commits its sole vote.
 const COMMIT_PHASE_TS: u64 = T0 + 100;
-const REVEAL_PHASE_TS: u64 = T0 + 86_401;   // after 1-day commit deadline
-const FINALIZE_TS: u64 = T0 + 172_801;      // after 1-day reveal deadline
-const TIMELOCK_DURATION: u64 = 259_200;     // 3-day admin timelock
+/// Timestamp after the one-day commit deadline and during reveal.
+const REVEAL_PHASE_TS: u64 = T0 + 86_401;
+/// Timestamp after the one-day reveal deadline and eligible for finalization.
+const FINALIZE_TS: u64 = T0 + 172_801;
+/// Three-day delay enforced by parameter-change proposals.
+const TIMELOCK_DURATION: u64 = 259_200;
 
-// Monthly inflation / burn-recycling budget.
-const MONTH_SECONDS: u64 = 2_592_000; // fixed 30-day month
+/// Duration of one fixed 30-day budget month.
+const MONTH_SECONDS: u64 = 2_592_000;
+/// Basis-point denominator used by the monthly inflation calculation.
 const BUDGET_BPS_DENOM: u256 = 10_000;
+/// Number of monthly budget periods in a year.
 const MONTHS_PER_YEAR: u256 = 12;
 
 // ////////////////////////////////////////////////////////////////
                             // TEST FIXTURE
 // ////////////////////////////////////////////////////////////////
 
+/// Returns the deterministic default-admin address used by the test suite.
 fn admin() -> ContractAddress {
     'admin'.try_into().unwrap()
 }
+
+/// Returns the address that receives the constructor's initial token supply.
 fn whale() -> ContractAddress {
     'whale'.try_into().unwrap()
 }
+
+/// Returns the address used as the sole staked juror in deterministic tests.
 fn juror() -> ContractAddress {
     'juror'.try_into().unwrap()
 }
+
+/// Returns the address used as the evaluated candidate and conviction owner.
 fn candidate() -> ContractAddress {
     'candidate'.try_into().unwrap()
 }
+
+/// Returns the address used as the funding-proposal author.
 fn creator() -> ContractAddress {
     'creator'.try_into().unwrap()
 }
+
+/// Returns the address that receives proposal rewards.
 fn funding_wallet() -> ContractAddress {
     'funding_wallet'.try_into().unwrap()
 }
+
+/// Returns the address mocked as the Cartridge VRF provider.
 fn vrf_provider() -> ContractAddress {
     'vrf_provider'.try_into().unwrap()
 }
 
+/// Creates a contract dispatcher for the governance ABI.
 fn gov_disp(contract: ContractAddress) -> IStakeholderConvictionDispatcher {
     IStakeholderConvictionDispatcher { contract_address: contract }
 }
 
+/// Creates an ERC20 dispatcher targeting the contract's embedded token.
 fn tok_disp(contract: ContractAddress) -> IERC20Dispatcher {
     IERC20Dispatcher { contract_address: contract }
 }
 
-/// Declares + deploys the contract and stubs VRF randomness.
+/// Declares and deploys the contract with deterministic VRF randomness.
 fn deploy(
     threshold: u256, reward_multiplier: u256, mini_reward_multiplier: u256,
+) -> ContractAddress {
+    deploy_with_capacity(threshold, reward_multiplier, mini_reward_multiplier, 32_u32)
+}
+
+/// Declares and deploys the contract with a selected Fenwick-tree capacity.
+fn deploy_with_capacity(
+    threshold: u256,
+    reward_multiplier: u256,
+    mini_reward_multiplier: u256,
+    tree_capacity: u32,
 ) -> ContractAddress {
     let contract_class = declare("StakeholderConviction").unwrap().contract_class();
 
@@ -101,7 +142,7 @@ fn deploy(
     name.serialize(ref calldata);
     symbol.serialize(ref calldata);
     calldata.append(whale().into());
-    (32_u32).serialize(ref calldata);
+    tree_capacity.serialize(ref calldata);
     calldata.append(vrf_provider().into());
     (BOND).serialize(ref calldata);
     (DEPOSIT).serialize(ref calldata);
@@ -117,27 +158,33 @@ fn deploy(
     contract_address
 }
 
-/// `from` (initially the whale) sends `amount` tokens to `to`.
+/// Transfers `amount` tokens from the whale recipient to `to`.
 fn fund(contract: ContractAddress, to: ContractAddress, amount: u256) {
     start_cheat_caller_address(contract, whale());
     tok_disp(contract).transfer(to, amount);
 }
 
-/// Juror approves the contract and stakes `STAKE`.
+/// Has the default juror approve and deposit the standard test stake.
 fn stake_juror(contract: ContractAddress) {
     start_cheat_caller_address(contract, juror());
     tok_disp(contract).approve(juror(), STAKE);
     gov_disp(contract).stake(STAKE);
 }
 
-/// Candidate requests evaluation (pays the bond). VRF draws the single juror.
+/// Returns a distinct numeric address for a multi-juror test index.
+fn juror_address(index: u32) -> ContractAddress {
+    let raw: felt252 = (index + 1_000).into();
+    raw.try_into().unwrap()
+}
+
+/// Requests a candidate evaluation with the standard bond and evidence.
 fn request_evaluation(contract: ContractAddress) -> u256 {
     start_cheat_caller_address(contract, candidate());
     tok_disp(contract).approve(candidate(), BOND);
     gov_disp(contract).request_evaluation("evidence")
 }
 
-/// Drawn juror commits `score` then reveals it after the commit deadline.
+/// Commits and then reveals `score` as the deterministic sole juror.
 fn disclose(contract: ContractAddress, dispute_id: u256, score: i8) {
     let salt: felt252 = 0xbeef;
     let mut hash_input: Array<felt252> = array![];
@@ -153,13 +200,13 @@ fn disclose(contract: ContractAddress, dispute_id: u256, score: i8) {
     gov_disp(contract).reveal_vote(dispute_id, score, salt);
 }
 
-/// Anyone can finalize once the reveal window has closed.
+/// Finalizes a dispute after the standard reveal-window timestamp.
 fn finalize(contract: ContractAddress, dispute_id: u256) {
     start_cheat_block_timestamp(contract, FINALIZE_TS);
     gov_disp(contract).finalize_selection(dispute_id);
 }
 
-/// Full selection flow for one candidate; returns the positive/negative score outcome.
+/// Runs the standard single-juror selection flow and returns its dispute ID.
 fn evaluate(contract: ContractAddress, score: i8) -> u256 {
     start_cheat_block_timestamp(contract, T0);
     fund(contract, juror(), FUND);
@@ -173,7 +220,7 @@ fn evaluate(contract: ContractAddress, score: i8) -> u256 {
     dispute_id
 }
 
-/// Creator approves the deposit and creates a proposal.
+/// Has the creator approve the standard deposit and create a proposal.
 fn create_proposal(contract: ContractAddress, wallet: ContractAddress, evidence: ByteArray) -> u256 {
     start_cheat_caller_address(contract, creator());
     tok_disp(contract).approve(creator(), DEPOSIT);
@@ -184,6 +231,10 @@ fn create_proposal(contract: ContractAddress, wallet: ContractAddress, evidence:
             // STAGE 1: EVALUATION BOND REFUND / SLASH
 // ////////////////////////////////////////////////////////////////
 
+/// Verifies that a positive evaluation refunds the bond and mints governance tokens.
+///
+/// The sole juror reveals a score of five, and the test checks the candidate's
+/// balances, governance state, dispute score, and active-dispute cleanup.
 #[test]
 fn test_positive_score_refunds_bond_and_mints_governance() {
     let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
@@ -206,6 +257,86 @@ fn test_positive_score_refunds_bond_and_mints_governance() {
     assert(gov.get_active_dispute_for_candidate(candidate()) == 0, 'no active dispute expected');
 }
 
+/// Verifies a 50-juror weighted selection pool and its 50 draw operations.
+///
+/// Each distinct address contributes the same stake, the configured draw
+/// count is raised to 50, and every deduplicated selected juror receives one
+/// open-dispute lock. Draws are weighted with replacement, so the test does
+/// not require all 50 pool members to be selected.
+#[test]
+fn test_fifty_staked_jurors_participate_in_weighted_draw() {
+    let contract = deploy_with_capacity(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT, 64_u32);
+    let gov = gov_disp(contract);
+    let tok = tok_disp(contract);
+
+    start_cheat_block_timestamp(contract, T0);
+
+    let mut index: u32 = 0;
+    loop {
+        if index >= JUROR_COUNT {
+            break;
+        }
+        let address = juror_address(index);
+        fund(contract, address, STAKE);
+        start_cheat_caller_address(contract, address);
+        tok.approve(address, STAKE);
+        gov.stake(STAKE);
+        index += 1;
+    };
+
+    let expected_total_weight: u256 = 50_u256 * STAKE;
+    let total_weighted = gov.total_stake_weight() == expected_total_weight;
+    assert(total_weighted, 'weight mismatch');
+
+    fund(contract, candidate(), FUND);
+    start_cheat_caller_address(contract, admin());
+    gov.propose_set_num_draws(JUROR_COUNT);
+    start_cheat_block_timestamp(contract, T0 + TIMELOCK_DURATION);
+    gov.execute_set_num_draws();
+    assert(gov.get_num_draws() == JUROR_COUNT, 'num draws should be configured');
+
+    start_cheat_caller_address(contract, candidate());
+    tok.approve(candidate(), BOND);
+    let dispute_id = gov.request_evaluation("fifty-juror evidence");
+    let d = gov.get_dispute(dispute_id);
+
+    assert(d.num_draws == JUROR_COUNT, 'dispute should record 50 draws');
+    let has_draws = d.unique_juror_count > 0_u32;
+    assert(has_draws, 'no juror drawn');
+    let draw_count_is_bounded = d.unique_juror_count <= JUROR_COUNT;
+    assert(draw_count_is_bounded, 'too many unique');
+
+    let mut locked_juror_count: u32 = 0;
+    let mut check_index: u32 = 0;
+    loop {
+        if check_index >= JUROR_COUNT {
+            break;
+        }
+        let address = juror_address(check_index);
+        let stake_matches = gov.get_juror_stake(address) == STAKE;
+        assert(stake_matches, 'stake missing');
+        let open_disputes = gov.get_juror_open_dispute_count(address);
+        let open_count_is_bounded = open_disputes <= 1_u32;
+        assert(open_count_is_bounded, 'lock count high');
+        if open_disputes == 1_u32 {
+            let locked_stake_matches = gov.get_juror_locked_stake(address) == STAKE;
+            assert(locked_stake_matches, 'wrong lock amount');
+        } else {
+            let unlocked_stake_matches = gov.get_juror_locked_stake(address) == 0_u256;
+            assert(unlocked_stake_matches, 'unselected locked');
+        }
+        locked_juror_count += open_disputes;
+        check_index += 1;
+    };
+
+    let lock_count_matches = locked_juror_count == d.unique_juror_count;
+    assert(lock_count_matches, 'lock mismatch');
+}
+
+/// Verifies that a negative evaluation slashes the bond without minting governance.
+///
+/// The sole juror reveals a score of negative five, after which the coherent
+/// juror claims the resulting slash-pool reward.
 #[test]
 fn test_negative_score_slashes_bond_and_mints_nothing() {
     let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
@@ -236,6 +367,10 @@ fn test_negative_score_slashes_bond_and_mints_nothing() {
     // STAGE 3: CONVICTION VOTING + SCORE-BASED REWARDS
 // ////////////////////////////////////////////////////////////////
 
+/// Verifies positive-score proposal execution, reward minting, and deposit refund.
+///
+/// A level-one conviction supplies enough power to pass the threshold, and the
+/// test checks the frozen power, final score, recipient reward, and author refund.
 #[test]
 fn test_positive_score_rewards_and_refunds_deposit() {
     let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
@@ -270,6 +405,10 @@ fn test_positive_score_rewards_and_refunds_deposit() {
     assert(tok.balance_of(creator()) == FUND, 'deposit should be refunded');
 }
 
+/// Verifies the reduced reward multiplier for scores one through three.
+///
+/// Two proposals receive scores five and two, then the test confirms the full
+/// and reduced payouts, final scores, and refunds for both deposits.
 #[test]
 fn test_score_1_to_3_uses_mini_reward_multiplier() {
     let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
@@ -309,6 +448,10 @@ fn test_score_1_to_3_uses_mini_reward_multiplier() {
     assert(tok.balance_of(creator()) == FUND, 'both deposits refunded');
 }
 
+/// Verifies that a negative proposal score slashes the author's deposit.
+///
+/// A conviction votes negative five, the proposal executes, and the test checks
+/// that no reward is minted while the proposal deposit is forfeited.
 #[test]
 fn test_negative_score_slashes_proposal_deposit() {
     let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
@@ -335,6 +478,10 @@ fn test_negative_score_slashes_proposal_deposit() {
     assert(tok.balance_of(creator()) == FUND - DEPOSIT, 'deposit should be slashed');
 }
 
+/// Verifies that proposal execution rejects power below the configured threshold.
+///
+/// A single small conviction votes on a proposal whose threshold is deliberately
+/// high; voting succeeds, but execution must panic with `ThresholdNotMet`.
 #[test]
 #[should_panic(expected: ('ThresholdNotMet',))]
 fn test_execute_proposal_below_threshold_reverts() {
@@ -360,6 +507,11 @@ fn test_execute_proposal_below_threshold_reverts() {
             // CONVICTION POWER & LOCK ACCOUNTING
 // ////////////////////////////////////////////////////////////////
 
+/// Verifies conviction power, permanent votes, release eligibility, and re-locking.
+///
+/// A level-three conviction casts a vote, releases after its lock window, and
+/// then locks the returned stake into a second conviction; both vote powers
+/// remain frozen and the released vote continues to count.
 #[test]
 fn test_conviction_power_and_release_accounting() {
     let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
@@ -420,6 +572,10 @@ fn test_conviction_power_and_release_accounting() {
     assert(gov.get_proposal_total_power(proposal_id) == 77_459_666_924, 'old vote persists');
 }
 
+/// Verifies that one conviction cannot vote twice on the same proposal.
+///
+/// The first vote is accepted and the second identical vote must panic with
+/// `AlreadyVotedOnProposal`.
 #[should_panic(expected: ('AlreadyVotedOnProposal',))]
 #[test]
 fn test_conviction_cannot_vote_twice() {
@@ -443,6 +599,10 @@ fn test_conviction_cannot_vote_twice() {
 // which stays O(1) and passes at the very end. (The snforge VM limits the
 // events a single test transaction may emit, so the raw emitter count here is
 // capped at 400; the on-contract design itself scales without bound.)
+/// Verifies unbounded supporter scaling with an O(1) proposal-power accumulator.
+///
+/// Four hundred convictions cast separate votes, after which the test checks the
+/// exact aggregate and executes the proposal without iterating a supporter list.
 #[test]
 fn test_voting_scales_beyond_old_supporter_cap() {
     let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
@@ -476,6 +636,10 @@ fn test_voting_scales_beyond_old_supporter_cap() {
 
 // A single conviction may back multiple distinct proposals (not the same one
 // twice) up to `max_votes_per_conviction`.
+/// Verifies that one conviction can support multiple distinct proposals.
+///
+/// The same conviction votes with different scores on two proposals, and the
+/// test checks the vote count, lock duration, and unchanged per-proposal power.
 #[test]
 fn test_single_conviction_votes_on_multiple_proposals() {
     let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
@@ -501,6 +665,10 @@ fn test_single_conviction_votes_on_multiple_proposals() {
         'conviction power mismatch');
 }
 
+/// Verifies enforcement of the per-conviction distinct-proposal vote limit.
+///
+/// Ten distinct proposals are accepted, while the eleventh vote must panic with
+/// `MaxVotesReached`.
 #[should_panic(expected: ('MaxVotesReached',))]
 #[test]
 fn test_max_votes_per_conviction_enforced() {
@@ -535,6 +703,10 @@ fn test_max_votes_per_conviction_enforced() {
     };
 }
 
+/// Verifies that conviction voting is rejected after the lock window expires.
+///
+/// The clock advances beyond the level-one lock duration before the first vote,
+/// which must panic with `LockExpired`.
 #[should_panic(expected: ('LockExpired',))]
 #[test]
 fn test_vote_after_lock_expiry_reverts() {
@@ -552,6 +724,10 @@ fn test_vote_after_lock_expiry_reverts() {
     gov.vote_with_conviction(proposal_id, conviction_id, 5);
 }
 
+/// Verifies that conviction stake cannot be released before lock expiry.
+///
+/// A level-three conviction attempts release during its active window and must
+/// panic with `LockNotExpired`.
 #[should_panic(expected: ('LockNotExpired',))]
 #[test]
 fn test_release_before_lock_expiry_reverts() {
@@ -571,6 +747,10 @@ fn test_release_before_lock_expiry_reverts() {
                     // ADMIN TIMELOCK ENGINE
 // ////////////////////////////////////////////////////////////////
 
+/// Verifies the default draw count and its complete timelocked update flow.
+///
+/// The admin proposes a new value, the pending record is inspected, execution
+/// is delayed beyond the timelock, and the applied value clears the record.
 #[test]
 fn test_num_draws_default_and_timelocked_change() {
     let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
@@ -595,6 +775,10 @@ fn test_num_draws_default_and_timelocked_change() {
     assert(!pending.exists, 'pending entry should be cleared');
 }
 
+/// Verifies the default conviction base lock and its timelocked update flow.
+///
+/// The admin doubles the per-level lock, and the test checks both the pending
+/// change and the value exposed after the three-day delay.
 #[test]
 fn test_conviction_base_lock_timelocked_change() {
     let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
@@ -616,6 +800,10 @@ fn test_conviction_base_lock_timelocked_change() {
     assert(gov.get_conviction_base_lock() == 2 * 9_460_800, 'base lock updated');
 }
 
+/// Verifies the default per-conviction vote limit and its timelocked update flow.
+///
+/// The admin proposes twenty-five votes, and the test checks the pending record
+/// before confirming the new value after the timelock.
 #[test]
 fn test_max_votes_per_conviction_timelocked_change() {
     let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
@@ -637,6 +825,9 @@ fn test_max_votes_per_conviction_timelocked_change() {
     assert(gov.get_max_votes_per_conviction() == 25, 'max votes updated');
 }
 
+/// Verifies that conviction base-lock proposals cannot exceed the five-year cap.
+///
+/// An admin proposes one second beyond the maximum and must receive `TooHigh`.
 #[test]
 #[should_panic(expected: ('TooHigh',))]
 fn test_propose_conviction_base_lock_above_max_reverts() {
@@ -648,6 +839,10 @@ fn test_propose_conviction_base_lock_above_max_reverts() {
     gov.propose_set_conviction_base_lock(157_680_001);
 }
 
+/// Verifies that a conviction cannot create a lock exceeding the absolute cap.
+///
+/// The base lock is raised to the five-year limit, making a level-two
+/// conviction exceed it and panic with `LockTooLong`.
 #[test]
 #[should_panic(expected: ('LockTooLong',))]
 fn test_create_conviction_lock_too_long_reverts() {
@@ -667,6 +862,10 @@ fn test_create_conviction_lock_too_long_reverts() {
     gov.create_conviction(2, 1_000 * ONE);
 }
 
+/// Verifies that parameter execution is rejected before its timelock elapses.
+///
+/// The admin proposes an evaluation-bond change and attempts execution early;
+/// the call must panic with `TimelockNotElapsed`.
 #[test]
 #[should_panic(expected: ('TimelockNotElapsed',))]
 fn test_execute_param_change_before_timelock_reverts() {
@@ -681,6 +880,10 @@ fn test_execute_param_change_before_timelock_reverts() {
     gov.execute_set_evaluation_bond_amount();
 }
 
+/// Verifies that a timelocked evaluation-bond update becomes effective.
+///
+/// The test checks the initial bond, pending value and effective timestamp,
+/// then confirms execution after the delay applies the new amount.
 #[test]
 fn test_evaluation_bond_timelocked_change_takes_effect() {
     let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
@@ -707,6 +910,10 @@ fn test_evaluation_bond_timelocked_change_takes_effect() {
         // MONTHLY INFLATION / BURN-RECYCLING BUDGET
 // ////////////////////////////////////////////////////////////////
 
+/// Verifies initialization of the first monthly inflation budget.
+///
+/// Month zero starts with the five-percent annual inflation share divided across
+/// twelve months, with no prior burns, mints, or rollover.
 #[test]
 fn test_initial_month_budget_is_inflation_share() {
     let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
@@ -722,6 +929,10 @@ fn test_initial_month_budget_is_inflation_share() {
     assert(gov.get_inflation_rate_bps() == 500, 'default rate should be 5%');
 }
 
+/// Verifies that a successfully minted reward consumes the active monthly budget.
+///
+/// A positive proposal executes after the month boundary, and the test compares
+/// remaining budget and month mints before and after the reward.
 #[test]
 fn test_reward_mints_consume_monthly_budget() {
     let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
@@ -746,6 +957,10 @@ fn test_reward_mints_consume_monthly_budget() {
     assert(gov.get_month_budget_minted(month) == reward, 'minted mismatch');
 }
 
+/// Verifies best-effort reward minting when the monthly budget is insufficient.
+///
+/// The configured reward exceeds the month's budget, so the payout is skipped
+/// while proposal execution, score finalization, and deposit refund still occur.
 #[test]
 fn test_reward_exceeding_monthly_budget_skips_mint_but_executes() {
     let contract = deploy(THRESHOLD, 10_000 * ONE, MINI_REWARD_MULT);
@@ -776,6 +991,11 @@ fn test_reward_exceeding_monthly_budget_skips_mint_but_executes() {
 // A-2 + B-1: in a zero-budget month (inflation 0, no burns), slashing, decay
 // and proposal execution must all still work; only the bonus/reward mints are
 // skipped instead of reverting the underlying operation.
+/// Verifies core operations remain usable when the monthly budget is zero.
+///
+/// The test exercises juror slashing, positive evaluation, proposal execution,
+/// and ERC20 decay, confirming that unavailable keeper and reward mints are
+/// skipped without reverting the underlying operations.
 #[test]
 fn test_zero_budget_month_slash_decay_and_execution_still_work() {
     let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
@@ -862,6 +1082,10 @@ fn test_zero_budget_month_slash_decay_and_execution_still_work() {
 }
 
 // C-2: disabling upgrades is a two-step, 7-day-timelocked admin action.
+/// Verifies the complete two-step, seven-day upgrade-disable flow.
+///
+/// The admin proposes permanent upgrade disablement, the state remains enabled
+/// before the deadline, and execution after seven days clears the pending flag.
 #[test]
 fn test_disable_upgrades_timelocked_flow() {
     let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
@@ -885,6 +1109,10 @@ fn test_disable_upgrades_timelocked_flow() {
 }
 
 // C-2: the two-step disable cannot be executed before the 7-day timelock.
+/// Verifies that upgrade disablement cannot execute before seven days.
+///
+/// The admin proposes the change and attempts execution one second early; the
+/// call must panic with `TimelockNotElapsed`.
 #[test]
 #[should_panic(expected: ('TimelockNotElapsed',))]
 fn test_disable_upgrades_before_timelock_reverts() {
@@ -900,6 +1128,9 @@ fn test_disable_upgrades_before_timelock_reverts() {
 }
 
 // C-3: the conviction threshold cannot be set to zero (turns the gate off).
+/// Verifies that the conviction execution threshold cannot be set to zero.
+///
+/// An admin proposal for zero is rejected to preserve the governance gate.
 #[test]
 #[should_panic(expected: ('ZeroAmount',))]
 fn test_zero_conviction_threshold_reverts() {
@@ -910,6 +1141,10 @@ fn test_zero_conviction_threshold_reverts() {
     gov.propose_set_conviction_threshold(0);
 }
 
+/// Verifies that recorded burns increase the following month's budget.
+///
+/// Tokens burned in month zero are tracked, a rollover is triggered, and the
+/// next budget is checked against inflation plus the recycled burn amount.
 #[test]
 fn test_burned_tokens_recycle_into_next_month_budget() {
     let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
@@ -931,6 +1166,10 @@ fn test_burned_tokens_recycle_into_next_month_budget() {
     assert(gov.get_month_budget(1) == inflation_part + 1_000 * ONE, 'recycle mismatch');
 }
 
+/// Verifies that unused monthly budget is written off at rollover.
+///
+/// With no mint or burn usage in month zero, the test confirms the next budget
+/// contains only the fresh inflation share and no leftover carry-forward.
 #[test]
 fn test_unused_budget_is_not_recycled() {
     let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
@@ -949,6 +1188,10 @@ fn test_unused_budget_is_not_recycled() {
     assert(gov.get_month_burned(0) == 0, 'leftover is not a recorded burn');
 }
 
+/// Verifies that the inflation rate changes only through the admin timelock.
+///
+/// The admin proposes three percent, inspects the pending value, and confirms
+/// the new rate after the required delay.
 #[test]
 fn test_inflation_rate_timelocked_change() {
     let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
@@ -968,6 +1211,9 @@ fn test_inflation_rate_timelocked_change() {
     assert(gov.get_inflation_rate_bps() == 300, 'rate updated');
 }
 
+/// Verifies that inflation-rate proposals above five percent are rejected.
+///
+/// An admin proposal for 501 basis points must panic with `TooHigh`.
 #[test]
 #[should_panic(expected: ('TooHigh',))]
 fn test_inflation_rate_above_max_reverts() {
@@ -985,6 +1231,10 @@ fn test_inflation_rate_above_max_reverts() {
 const MAX_SUPPLY_ONE: u256 = 50_000_000 * ONE; // contract MAX_SUPPLY = 50M tokens
 
 // H2: the contract's own escrow must never be burnable via public decay.
+/// Verifies that public decay cannot burn the contract's protected escrow address.
+///
+/// Calling `apply_decay` with the contract itself as the target must panic with
+/// `ProtectedAddress`.
 #[test]
 #[should_panic(expected: ('ProtectedAddress',))]
 fn test_apply_decay_on_contract_address_reverts() {
@@ -995,6 +1245,10 @@ fn test_apply_decay_on_contract_address_reverts() {
     gov.apply_decay(contract);
 }
 
+/// Verifies that batched decay also protects the contract's escrow address.
+///
+/// A batch containing the contract address must panic with `ProtectedAddress`
+/// rather than allowing protected funds to be burned.
 #[test]
 #[should_panic(expected: ('ProtectedAddress',))]
 fn test_batch_apply_decay_with_contract_address_reverts() {
@@ -1008,6 +1262,10 @@ fn test_batch_apply_decay_with_contract_address_reverts() {
 
 // H3: a dispute with zero reveals must settle score-neutral, refund the bond,
 // and release the candidate instead of being stuck forever.
+/// Verifies neutral settlement when the selected juror never reveals.
+///
+/// Finalization with zero reveals refunds the bond, records a zero score,
+/// clears active-dispute state, and mints no governance tokens.
 #[test]
 fn test_zero_reveal_refunds_bond_and_clears_dispute() {
     let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
@@ -1041,6 +1299,10 @@ fn test_zero_reveal_refunds_bond_and_clears_dispute() {
 }
 
 // H4: num_draws must be bounded so a hostile propose cannot grief the draw loop.
+/// Verifies that the juror draw-count parameter is bounded.
+///
+/// A proposal for 101 draws exceeds `MAX_NUM_DRAWS` and must panic with
+/// `AboveMaxNumDraws` before any state is changed.
 #[test]
 #[should_panic(expected: ('AboveMaxNumDraws',))]
 fn test_num_draws_above_max_reverts() {
@@ -1053,6 +1315,10 @@ fn test_num_draws_above_max_reverts() {
 }
 
 // M3: u256 admin parameters are capped at MAX_SUPPLY.
+/// Verifies that u256 admin parameters are capped at the maximum token supply.
+///
+/// A conviction-threshold proposal one unit above `MAX_SUPPLY` must panic with
+/// `TooHigh`.
 #[test]
 #[should_panic(expected: ('TooHigh',))]
 fn test_param_amount_above_max_supply_reverts() {
@@ -1066,6 +1332,10 @@ fn test_param_amount_above_max_supply_reverts() {
 
 // L1: a contract untouched for many months clamps the rollover instead of
 // hard-reverting, so no single call can grief an old contract.
+/// Verifies bounded month rollover after a long period without activity.
+///
+/// Advancing 130 months causes one call to settle at most the 120-month cap
+/// instead of reverting or attempting an unbounded loop.
 #[test]
 fn test_far_future_rollover_clamps_instead_of_reverting() {
     let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
@@ -1080,6 +1350,10 @@ fn test_far_future_rollover_clamps_instead_of_reverting() {
 }
 
 // L6: evidence payloads are size-capped to keep calldata/gas predictable.
+/// Verifies the maximum proposal evidence payload size.
+///
+/// A proposal whose evidence exceeds 1,024 bytes must panic with
+/// `EvidenceTooLong` before proposal state is created.
 #[test]
 #[should_panic(expected: ('EvidenceTooLong',))]
 fn test_create_proposal_evidence_too_long_reverts() {
@@ -1103,6 +1377,10 @@ fn test_create_proposal_evidence_too_long_reverts() {
 
 // L7: a final score of exactly zero is treated as neutral - deposit refunded,
 // no score-based reward minted.
+/// Verifies neutral proposal settlement for an exact zero score.
+///
+/// A conviction votes zero, execution completes, the author's deposit is
+/// refunded, and no score-based reward is minted.
 #[test]
 fn test_zero_score_refunds_deposit_and_mints_no_reward() {
     let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
@@ -1135,6 +1413,10 @@ fn test_zero_score_refunds_deposit_and_mints_no_reward() {
 // ("dust voting to capture conviction voting"); the static isqrt(level * amount)
 // weight keeps dust as dust forever, so neither its own power nor the proposal
 // power_total moves across a 3-year jump.
+/// Verifies that a dust conviction's vote power never compounds with time.
+///
+/// A one-wei conviction casts a positive vote, then the clock advances three
+/// years; both the conviction and proposal accumulators must remain unchanged.
 #[test]
 fn test_dust_conviction_power_is_frozen_across_time() {
     let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
@@ -1163,6 +1445,10 @@ fn test_dust_conviction_power_is_frozen_across_time() {
 
 // Invariant: stake then partial-unstake must conserve the juror's total value
 // (stake + free balance) exactly, for arbitrary amounts.
+/// Fuzzes juror staking and partial unstaking for exact value conservation.
+///
+/// Inputs are bounded to the funded balance, and the final free ERC20 balance
+/// plus locked juror stake must equal the original funded amount.
 #[test]
 #[fuzzer(runs: 250)]
 fn test_fuzz_stake_unstake_conserves_value(stake_amount: u256, unstake_amount: u256) {
@@ -1187,6 +1473,10 @@ fn test_fuzz_stake_unstake_conserves_value(stake_amount: u256, unstake_amount: u
 
 // Invariant: applying decay at arbitrary (possibly out-of-order) timestamps can
 // never increase a user's balance or mint tokens to them.
+/// Fuzzes decay at arbitrary timestamps for a non-increasing balance invariant.
+///
+/// Two bounded timestamps are applied in sequence, including out-of-order
+/// values, and the user's balance must never increase.
 #[test]
 #[fuzzer(runs: 100)]
 fn test_fuzz_apply_decay_is_non_increasing(t1: u64, t2: u64) {
@@ -1215,6 +1505,10 @@ fn test_fuzz_apply_decay_is_non_increasing(t1: u64, t2: u64) {
 
 // Invariant: a proposal's frozen power_total is exactly the sum of the static
 // vote weights (isqrt(level * amount)) regardless of the amounts committed.
+/// Fuzzes aggregate conviction power against the exact sum of static weights.
+///
+/// Two bounded level-one convictions vote on one proposal, and the proposal
+/// accumulator must equal the independently computed square-root weight sum.
 #[test]
 #[fuzzer(runs: 50)]
 fn test_fuzz_power_total_matches_sum_of_vote_weights(a: u256, b: u256) {
