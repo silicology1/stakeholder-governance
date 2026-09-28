@@ -1,4 +1,6 @@
-# Stakeholder goverance
+# Stakeholder governance
+
+Stakeholder governance build with cairo for starknet.
 
 
 1. **Stakeholder selection:** Through kleros or schelling game, Score +5 to -5. 
