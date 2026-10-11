@@ -10,10 +10,17 @@
 /// Fixed-point multiplier used while calculating weighted means and standard
 /// deviations. Scores are integers in the range -5 through 5.
 pub const SCALE: i64 = 1000;
-/// Maximum absolute score difference used to classify a juror as coherent.
-pub const COHERENCE_BAND: i64 = 1;
+/// Default maximum absolute score difference used to classify a juror as
+/// coherent. Admin-tunable through the timelocked `PARAM_COHERENCE_BAND`.
+pub const DEFAULT_COHERENCE_BAND: u8 = 1;
+/// Maximum configurable coherence band. `propose_set_coherence_band` rejects
+/// values above this.
+pub const MAX_COHERENCE_BAND: u8 = 3;
 /// Default fraction of a non-revealing juror's stake that is slashed.
 pub const DEFAULT_SLASH_BPS: u16 = 3000;
+/// Default fraction of an incoherent (revealed-but-against-the-majority)
+/// juror's stake that is slashed into the dispute slash pool.
+pub const DEFAULT_INCOHERENCE_SLASH_BPS: u16 = 3000;
 /// Denominator for values expressed in basis points.
 pub const BPS_DENOM: u256 = 10_000;
 
@@ -86,7 +93,12 @@ pub const MAX_LOCK_DURATION: u64 = 157_680_000;
 /// Default number of distinct proposals one conviction may vote on.
 pub const DEFAULT_MAX_VOTES_PER_CONVICTION: u64 = 10;
 /// Maximum configurable value for votes per conviction.
-pub const MAX_MAX_VOTES_PER_CONVICTION: u64 = 100;
+pub const MAX_MAX_VOTES_PER_CONVICTION: u64 = 1000;
+/// Default minimum seconds a funding proposal must be open for voting before
+/// `execute_proposal` is allowed to run.
+pub const DEFAULT_PROPOSAL_VOTING_PERIOD: u64 = 604_800;
+/// Maximum configurable funding-proposal voting period in seconds (one year).
+pub const MAX_PROPOSAL_VOTING_PERIOD: u64 = 31_536_000;
 
 /// Number of calendar months used when annualizing inflation.
 pub const MONTHS_PER_YEAR: u64 = 12;
@@ -127,6 +139,10 @@ pub const PARAM_COMMIT_DURATION: felt252 = 'COMMIT_DURATION';
 pub const PARAM_REVEAL_DURATION: felt252 = 'REVEAL_DURATION';
 /// Storage key for the non-reveal slash rate.
 pub const PARAM_NON_REVEAL_SLASH_BPS: felt252 = 'NON_REVEAL_SLASH_BPS';
+/// Storage key for the incoherence slash rate.
+pub const PARAM_INCOHERENCE_SLASH_BPS: felt252 = 'INCOHERENCE_SLASH_BPS';
+/// Storage key for the coherence band (max score distance for coherence).
+pub const PARAM_COHERENCE_BAND: felt252 = 'COHERENCE_BAND';
 /// Storage key for the ERC20 balance-decay rate.
 pub const PARAM_DECAY_RATE_BPS: felt252 = 'DECAY_RATE_BPS';
 /// Storage key for the minimum decay amount required for a caller reward.
@@ -141,3 +157,5 @@ pub const PARAM_INFLATION_RATE_BPS: felt252 = 'INFLATION_RATE';
 pub const PARAM_CONVICTION_BASE_LOCK: felt252 = 'CONVICTION_BASE_LOCK';
 /// Storage key for the per-conviction distinct-proposal vote limit.
 pub const PARAM_MAX_VOTES_PER_CONVICTION: felt252 = 'MAX_VOTES_CONVICTION';
+/// Storage key for the minimum funding-proposal voting period.
+pub const PARAM_PROPOSAL_VOTING_PERIOD: felt252 = 'PROPOSAL_VOTE_WINDOW';

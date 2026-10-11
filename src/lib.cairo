@@ -114,6 +114,10 @@
 //!   snapshots across every dispute they are currently drawn into and have
 //!   not yet resolved. `unstake` asserts
 //!   `current_stake - withdraw_amount >= juror_locked_total`.
+//! * A drawn juror's stake stays locked from the draw until the dispute is
+//!   finalized (for revealers) or until `slash_non_revealer` runs (for
+//!   non-revealers). Revealing does NOT release the lock, so an incoherent
+//!   juror cannot unstake to dodge the finalization-time slash.
 //! * `MAX_CONCURRENT_JUROR_LOCKS` (15) caps how many simultaneously-open
 //!   dispute locks a juror can carry; past that, they are skipped in the
 //!   draw via deterministic redraw.
@@ -125,6 +129,20 @@
 //!   Refunded on score zero or positive (`final_score >= 0`), otherwise
 //!   added to `slash_pool`.
 //! * One open request at a time per candidate.
+//!
+//! INCOHERENCE SLASHING (Schelling-game penalty)
+//! ---------------------------------------------
+//! * On `finalize_selection` every revealed juror whose score is more than
+//!   `coherence_band` (timelocked, default 1, max 3) away from the final score
+//!   is incoherent. Each such juror's draw-time stake snapshot is slashed by
+//!   `incoherence_slash_bps` (timelocked, default 30%) into the dispute's
+//!   `slash_pool`.
+//! * Coherent jurors split the enlarged pool proportionally to weight in
+//!   `claim_juror_reward`, so a minority attacker who votes against the
+//!   majority loses stake while honest coherent jurors earn it.
+//! * The penalty is skipped when no reveal is coherent (`total_coherent_weight
+//!   == 0`, a hung jury like a single +5/-5 split) because there is no majority
+//!   signal to reward and value would otherwise strand in an unclaimable pool.
 //!
 //! SCORE VOTING POWER
 //! -------------------
@@ -170,7 +188,7 @@ pub trait IStakeholderConviction<TContractState> {
     // ---- juror staking (Kleros side) ----
 
     /// Adds `amount` of the contract's ERC20 to the caller's juror stake.
-    /// The caller must approve this contract before invoking the method.
+    /// Transfers tokens directly from the caller to the contract.
     ///
     /// The amount is added to the Fenwick selection tree and `Staked` is emitted.
     /// Reverts for a zero amount, a failed transfer, or exhausted tree capacity.
@@ -188,7 +206,7 @@ pub trait IStakeholderConviction<TContractState> {
 
     /// Opens a bonded selection dispute for the caller and returns its ID.
     /// Evidence must be non-empty and no longer than `MAX_EVIDENCE_LEN`.
-    /// The caller must approve the current evaluation bond; a verified VRF
+    /// The caller transfers the evaluation bond; a verified VRF
     /// random value must be supplied in the same multicall before this call.
     /// The draw seed is the Poseidon hash of that VRF value and a recent
     /// on-chain block hash read directly by the contract.
@@ -209,7 +227,8 @@ pub trait IStakeholderConviction<TContractState> {
     /// Reveals a score in the inclusive range -5 through 5 for a committed vote.
     /// The commitment must equal the Poseidon hash of `(score, salt)`, the
     /// commit phase must have ended, and the reveal deadline must not have
-    /// passed. The caller's dispute stake lock is released exactly once.
+    /// passed. The caller's dispute stake lock stays held until finalization
+    /// so an incoherent reveal cannot be escaped by unstaking early.
     fn reveal_vote(ref self: TContractState, dispute_id: u256, score: i8, salt: felt252);
 
     /// Reports a drawn juror who failed to reveal and applies the configured slash.
@@ -223,12 +242,16 @@ pub trait IStakeholderConviction<TContractState> {
     /// Finalizes a dispute after its reveal deadline and stores its trimmed score.
     /// The routine computes a stake-weighted mean, removes votes more than one
     /// population standard deviation away, recomputes the mean, mints
-    /// governance tokens for positive scores, and settles the evaluation bond.
-    /// A dispute with no reveals settles at score zero and refunds its bond.
+    /// governance tokens for positive scores, settles the evaluation bond,
+    /// releases the stake locks of revealing jurors, and slashes incoherent
+    /// jurors into the dispute's slash pool. A dispute with no reveals settles
+    /// at score zero and refunds its bond.
     fn finalize_selection(ref self: TContractState, dispute_id: u256);
 
     /// Claims the caller's proportional share of a dispute's coherent-juror
-    /// slash pool. The dispute must be finalized, the caller coherent, and the
+    /// slash pool. The pool is funded by slashed non-revealer stake, an
+    /// incoherence-slashed minority, and (on negative scores) the candidate's
+    /// bond. The dispute must be finalized, the caller coherent, and the
     /// reward not previously claimed. The reward is transferred from escrow.
     fn claim_juror_reward(ref self: TContractState, dispute_id: u256);
 
@@ -248,7 +271,7 @@ pub trait IStakeholderConviction<TContractState> {
     // ---- score voting / proposal lifecycle ----
 
     /// Creates a funding proposal and escrows the current reputation deposit.
-    /// The caller must approve the contract for the deposit. Evidence must be
+    /// The caller transfers the deposit. Evidence must be
     /// non-empty and bounded. Returns the new proposal ID and emits
     /// `ProposalCreated`.
     fn create_proposal(
@@ -458,6 +481,26 @@ pub trait IStakeholderConviction<TContractState> {
     /// Executes the pending non-reveal slash-rate change after its timelock.
     fn execute_set_non_reveal_slash_bps(ref self: TContractState);
 
+    /// Returns the configured incoherence slash rate in basis points.
+    fn get_incoherence_slash_bps(self: @TContractState) -> u16;
+
+    /// Proposes the incoherence slash rate in basis points, from zero through
+    /// 10,000 (one hundred percent).
+    fn propose_set_incoherence_slash_bps(ref self: TContractState, bps: u16);
+
+    /// Executes the pending incoherence slash-rate change after its timelock.
+    fn execute_set_incoherence_slash_bps(ref self: TContractState);
+
+    /// Returns the configured coherence band (the maximum absolute score
+    /// difference that still counts as coherent).
+    fn get_coherence_band(self: @TContractState) -> u8;
+
+    /// Proposes the coherence band, from zero through `MAX_COHERENCE_BAND`.
+    fn propose_set_coherence_band(ref self: TContractState, band: u8);
+
+    /// Executes the pending coherence-band change after its timelock.
+    fn execute_set_coherence_band(ref self: TContractState);
+
     /// Proposes the ERC20 decay rate in basis points, from zero through 10,000.
     fn propose_set_decay_rate_bps(ref self: TContractState, bps: u16);
 
@@ -508,6 +551,16 @@ pub trait IStakeholderConviction<TContractState> {
 
     /// Returns the current distinct-proposal vote limit per conviction.
     fn get_max_votes_per_conviction(self: @TContractState) -> u64;
+
+    /// Proposes the minimum funding-proposal voting period in seconds. The
+    /// value must be positive and no greater than `MAX_PROPOSAL_VOTING_PERIOD`.
+    fn propose_set_proposal_voting_period(ref self: TContractState, duration: u64);
+
+    /// Executes the pending proposal voting-period change after its timelock.
+    fn execute_set_proposal_voting_period(ref self: TContractState);
+
+    /// Returns the current minimum funding-proposal voting period in seconds.
+    fn get_proposal_voting_period(self: @TContractState) -> u64;
 
     /// Proposes the monthly inflation rate in basis points, up to
     /// `MAX_INFLATION_BPS`.
@@ -732,6 +785,10 @@ pub mod StakeholderConviction {
         reveal_duration: u64,
         /// Fraction of a non-revealing juror's stake to slash, in basis points.
         non_reveal_slash_bps: u16,
+        /// Fraction of an incoherent juror's stake to slash, in basis points.
+        incoherence_slash_bps: u16,
+        /// Maximum absolute score difference that still counts as coherent.
+        coherence_band: u8,
 
         // ---- timelocked admin parameters ----
 
@@ -829,6 +886,8 @@ pub mod StakeholderConviction {
         conviction_base_lock: u64,
         /// Current maximum distinct proposals per conviction.
         max_votes_per_conviction: u64,
+        /// Minimum seconds a proposal stays open for voting before execution.
+        proposal_voting_period: u64,
 
         // ---- proposals ----
 
@@ -912,6 +971,7 @@ pub mod StakeholderConviction {
         VoteCommitted: VoteCommitted,
         VoteRevealed: VoteRevealed,
         JurorSlashed: JurorSlashed,
+        IncoherentJurorSlashed: IncoherentJurorSlashed,
         SlashKeeperRewarded: SlashKeeperRewarded,
         DisputeFinalized: DisputeFinalized,
         JurorRewardClaimed: JurorRewardClaimed,
@@ -992,9 +1052,12 @@ pub mod StakeholderConviction {
         self.commit_duration.write(DEFAULT_COMMIT_DURATION);
         self.reveal_duration.write(DEFAULT_REVEAL_DURATION);
         self.non_reveal_slash_bps.write(DEFAULT_SLASH_BPS);
+        self.incoherence_slash_bps.write(DEFAULT_INCOHERENCE_SLASH_BPS);
+        self.coherence_band.write(DEFAULT_COHERENCE_BAND);
         self.num_draws.write(DEFAULT_NUM_DRAWS);
         self.conviction_base_lock.write(DEFAULT_CONVICTION_BASE_LOCK);
         self.max_votes_per_conviction.write(DEFAULT_MAX_VOTES_PER_CONVICTION);
+        self.proposal_voting_period.write(DEFAULT_PROPOSAL_VOTING_PERIOD);
 
         // Timelocked admin parameters
         self.evaluation_bond_amount.write(evaluation_bond_amount);
@@ -1046,8 +1109,7 @@ pub mod StakeholderConviction {
             assert(amount > 0, 'ZeroAmount');
             let caller = get_caller_address();
 
-            let ok = self.erc20.transfer_from(caller, get_contract_address(), amount);
-            assert(ok, 'TransferFailed');
+            self.erc20._transfer(caller, get_contract_address(), amount);
 
             let index = self._get_or_create_index(caller);
             self._fenwick_add(index, amount);
@@ -1096,8 +1158,7 @@ pub mod StakeholderConviction {
             assert(!self.has_active_dispute.entry(candidate).read(), 'AlreadyUnderEvaluation');
 
             let bond_amount = self.evaluation_bond_amount.read();
-            let ok = self.erc20.transfer_from(candidate, get_contract_address(), bond_amount);
-            assert(ok, 'TransferFailed');
+            self.erc20._transfer(candidate, get_contract_address(), bond_amount);
 
             let num_draws = self.num_draws.read();
             let total_weight = self._fenwick_total();
@@ -1261,7 +1322,6 @@ pub mod StakeholderConviction {
 
             self.dispute_score.entry((dispute_id, caller)).write(score);
             self.dispute_revealed.entry((dispute_id, caller)).write(true);
-            self._release_dispute_lock(dispute_id, caller);
 
             self.emit(VoteRevealed { dispute_id, juror: caller, score });
             self.reentrancyguard.end();
@@ -1284,9 +1344,7 @@ pub mod StakeholderConviction {
             let slash_amount = stake * bps / BPS_DENOM;
 
             if slash_amount > 0 {
-                let index = self.juror_index.entry(juror).read();
-                self._fenwick_sub(index, slash_amount);
-                self.juror_stake.entry(juror).write(stake - slash_amount);
+                self._apply_juror_slash(juror, slash_amount);
 
                 let mut dm = self.disputes.entry(dispute_id).read();
                 dm.slash_pool += slash_amount;
@@ -1434,7 +1492,8 @@ pub mod StakeholderConviction {
             d.total_weight_revealed = total_weight;
             d.phase = PHASE_FINALIZED;
 
-            // coherence pass (for juror rewards)
+            // coherence + incoherence slashing pass (for juror rewards)
+            let coherence_band: i64 = self.coherence_band.read().into();
             let mut total_coherent_weight: u32 = 0;
             i = 0;
             loop {
@@ -1451,7 +1510,7 @@ pub mod StakeholderConviction {
                     } else {
                         final_score - score_i64
                     };
-                    if diff <= COHERENCE_BAND {
+                    if diff <= coherence_band {
                         self.dispute_coherent.entry((dispute_id, juror)).write(true);
                         total_coherent_weight += weight;
                     }
@@ -1459,6 +1518,51 @@ pub mod StakeholderConviction {
                 i += 1;
             };
             d.total_coherent_weight = total_coherent_weight;
+
+            // Slash incoherent (revealed-but-against-the-majority) jurors into
+            // the slash pool so coherent jurors earn a penalty-funded reward. The
+            // draw-time stake snapshot is still locked here (reveal does not
+            // release it), so the slash cannot be dodged by unstaking early. With
+            // no coherent weight there is no majority signal and no claimant, so
+            // the penalty is skipped to avoid stranding value in the pool.
+            let incoherence_bps: u256 = self.incoherence_slash_bps.read().into();
+            let lock_released = total_coherent_weight > 0;
+            i = 0;
+            loop {
+                if i >= d.unique_juror_count {
+                    break;
+                }
+                let juror = self.dispute_juror_list.entry((dispute_id, i)).read();
+                if self.dispute_revealed.entry((dispute_id, juror)).read() {
+                    if lock_released
+                        && !self.dispute_coherent.entry((dispute_id, juror)).read() {
+                        let snapshot = self
+                            .dispute_juror_locked_snapshot
+                            .entry((dispute_id, juror))
+                            .read();
+                        // Bounded by the juror's current stake (H-4): a juror
+                        // drawn into several disputes can already have been
+                        // slashed below `snapshot * bps`, and slashing what no
+                        // longer exists would revert the whole finalization.
+                        let raw_slash = snapshot * incoherence_bps / BPS_DENOM;
+                        let current_stake = self.juror_stake.entry(juror).read();
+                        let slash_amount = if raw_slash <= current_stake {
+                            raw_slash
+                        } else {
+                            current_stake
+                        };
+                        if slash_amount > 0 {
+                            self._apply_juror_slash(juror, slash_amount);
+                            d.slash_pool += slash_amount;
+                            self.emit(
+                                IncoherentJurorSlashed { dispute_id, juror, amount: slash_amount },
+                            );
+                        }
+                    }
+                    self._release_dispute_lock(dispute_id, juror);
+                }
+                i += 1;
+            };
 
             // governance token minting
             let mint_amount = governance_tokens_for_score(final_score);
@@ -1568,8 +1672,7 @@ pub mod StakeholderConviction {
 
             // Anti-Sybil deposit: pull reputation_stake of own ERC20
             let deposit = self.reputation_stake.read();
-            let ok = self.erc20.transfer_from(caller, get_contract_address(), deposit);
-            assert(ok, 'TransferFailed');
+            self.erc20._transfer(caller, get_contract_address(), deposit);
 
             let proposal_id = self.proposal_count.read();
             self.proposal_count.write(proposal_id + 1);
@@ -1715,6 +1818,13 @@ let caller = get_caller_address();
             // O(1) threshold check against the frozen power accumulator.
             let total_power = p.power_total;
             assert(total_power >= self.conviction_threshold.read(), 'ThresholdNotMet');
+
+            // Minimum voting window (H-3): a proposal cannot be executed in the
+            // same block (multicall) it reaches threshold — a single large
+            // holder cannot vote +5 and lock everyone else out. The window is
+            // measured from proposal creation and is admin-timelocked.
+            let voting_period = self.proposal_voting_period.read();
+            assert(get_block_timestamp() >= p.created_at + voting_period, 'VotingPeriodActive');
 
             // Compute weighted final score from histogram
             let final_score = self._compute_weighted_score(proposal_id);
@@ -2046,6 +2156,37 @@ let caller = get_caller_address();
             self.non_reveal_slash_bps.write(value_u16);
         }
 
+        fn get_incoherence_slash_bps(self: @ContractState) -> u16 {
+            self.incoherence_slash_bps.read()
+        }
+
+        fn propose_set_incoherence_slash_bps(ref self: ContractState, bps: u16) {
+            assert(bps <= 10_000, 'TooHigh');
+            self._propose_change(PARAM_INCOHERENCE_SLASH_BPS, bps.into());
+        }
+
+        fn execute_set_incoherence_slash_bps(ref self: ContractState) {
+            let value = self._execute_change(PARAM_INCOHERENCE_SLASH_BPS);
+            let value_u64: u64 = value.try_into().unwrap();
+            let value_u16: u16 = value_u64.try_into().unwrap();
+            self.incoherence_slash_bps.write(value_u16);
+        }
+
+        fn get_coherence_band(self: @ContractState) -> u8 {
+            self.coherence_band.read()
+        }
+
+        fn propose_set_coherence_band(ref self: ContractState, band: u8) {
+            assert(band <= MAX_COHERENCE_BAND, 'TooHigh');
+            self._propose_change(PARAM_COHERENCE_BAND, band.into());
+        }
+
+        fn execute_set_coherence_band(ref self: ContractState) {
+            let value = self._execute_change(PARAM_COHERENCE_BAND);
+            let value_u8: u8 = value.try_into().unwrap();
+            self.coherence_band.write(value_u8);
+        }
+
         fn propose_set_decay_rate_bps(ref self: ContractState, bps: u16) {
             assert(bps <= 10_000, 'TooHigh');
             self._propose_change(PARAM_DECAY_RATE_BPS, bps.into());
@@ -2124,6 +2265,22 @@ let caller = get_caller_address();
 
         fn get_max_votes_per_conviction(self: @ContractState) -> u64 {
             self.max_votes_per_conviction.read()
+        }
+
+        fn propose_set_proposal_voting_period(ref self: ContractState, duration: u64) {
+            assert(duration > 0, 'InvalidDuration');
+            assert(duration <= MAX_PROPOSAL_VOTING_PERIOD, 'TooHigh');
+            self._propose_change(PARAM_PROPOSAL_VOTING_PERIOD, duration.into());
+        }
+
+        fn execute_set_proposal_voting_period(ref self: ContractState) {
+            let value = self._execute_change(PARAM_PROPOSAL_VOTING_PERIOD);
+            let value_u64: u64 = value.try_into().unwrap();
+            self.proposal_voting_period.write(value_u64);
+        }
+
+        fn get_proposal_voting_period(self: @ContractState) -> u64 {
+            self.proposal_voting_period.read()
         }
 
         fn propose_set_inflation_rate_bps(ref self: ContractState, bps: u16) {
@@ -2853,6 +3010,17 @@ let caller = get_caller_address();
         }
 
         // ---- juror stake locking ----
+
+        /// Deducts `amount` from a juror's registered stake and its Fenwick
+        /// cells. The amount must not exceed the juror's current stake; both
+        /// the non-reveal and incoherence slash paths pass pre-bounded amounts.
+        fn _apply_juror_slash(ref self: ContractState, juror: ContractAddress, amount: u256) {
+            let stake = self.juror_stake.entry(juror).read();
+            assert(stake >= amount, 'SlashExceedsStake');
+            let index = self.juror_index.entry(juror).read();
+            self._fenwick_sub(index, amount);
+            self.juror_stake.entry(juror).write(stake - amount);
+        }
 
         /// Releases a dispute-specific juror stake snapshot exactly once.
         /// A release marker prevents repeated reveal or slash calls from

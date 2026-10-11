@@ -106,6 +106,20 @@ pub struct JurorSlashed {
     pub amount: u256,
 }
 
+/// Emitted when an incoherent (revealed-but-against-the-majority) juror's
+/// stake is slashed into the dispute's slash pool.
+#[derive(Drop, starknet::Event)]
+pub struct IncoherentJurorSlashed {
+    /// Indexed dispute identifier.
+    #[key]
+    pub dispute_id: u256,
+    /// Indexed slashed juror.
+    #[key]
+    pub juror: ContractAddress,
+    /// Amount removed from the juror's stake.
+    pub amount: u256,
+}
+
 /// Emitted when the caller reporting a non-revealer receives a reward.
 #[derive(Drop, starknet::Event)]
 pub struct SlashKeeperRewarded {

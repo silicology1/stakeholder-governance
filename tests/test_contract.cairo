@@ -17,8 +17,9 @@ use core::poseidon::poseidon_hash_span;
 use starknet::ContractAddress;
 
 use snforge_std::{
-    ContractClassTrait, DeclareResultTrait, declare, start_cheat_block_timestamp,
-    start_cheat_caller_address, start_mock_call,
+    ContractClassTrait, DeclareResultTrait, EventSpyTrait, declare, spy_events,
+    start_cheat_block_number_global, start_cheat_block_timestamp, start_cheat_caller_address,
+    start_mock_call,
 };
 
 use openzeppelin_interfaces::erc20::{IERC20Dispatcher, IERC20DispatcherTrait};
@@ -62,6 +63,8 @@ const REVEAL_PHASE_TS: u64 = T0 + 86_401;
 const FINALIZE_TS: u64 = T0 + 172_801;
 /// Three-day delay enforced by parameter-change proposals.
 const TIMELOCK_DURATION: u64 = 259_200;
+/// Default minimum proposal voting period before execution.
+const PROPOSAL_VOTING_PERIOD: u64 = 604_800;
 
 /// Duration of one fixed 30-day budget month.
 const MONTH_SECONDS: u64 = 2_592_000;
@@ -504,6 +507,56 @@ fn test_execute_proposal_below_threshold_reverts() {
 }
 
 // ////////////////////////////////////////////////////////////////
+        // H-3: MINIMUM PROPOSAL VOTING WINDOW
+// ////////////////////////////////////////////////////////////////
+
+/// A proposal cannot be executed in the same block it reaches threshold: a
+/// single large holder must not be able to vote +5 and execute in one multicall
+/// before anyone else can vote.
+#[test]
+#[should_panic(expected: ('VotingPeriodActive',))]
+fn test_execute_proposal_before_voting_period_reverts() {
+    let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
+    evaluate(contract, 5);
+
+    let gov = gov_disp(contract);
+    // Proposal created and voted on at the same timestamp, then executed at
+    // the exact same timestamp: still inside the 7-day window.
+    let proposal_id = create_proposal(contract, funding_wallet(), "proposal evidence");
+    start_cheat_caller_address(contract, candidate());
+    let conviction_id = gov.create_conviction(1, 1_000 * ONE);
+    gov.vote_with_conviction(proposal_id, conviction_id, 5);
+
+    gov.execute_proposal(proposal_id);
+}
+
+/// The minimum voting period defaults to seven days and is timelocked like
+/// every other admin parameter.
+#[test]
+fn test_proposal_voting_period_timelocked_change() {
+    let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
+    let gov = gov_disp(contract);
+    assert(gov.get_proposal_voting_period() == PROPOSAL_VOTING_PERIOD, 'default should be 7d');
+
+    start_cheat_block_timestamp(contract, T0);
+    start_cheat_caller_address(contract, admin());
+    gov.propose_set_proposal_voting_period(86_400);
+    start_cheat_block_timestamp(contract, T0 + TIMELOCK_DURATION + 1);
+    gov.execute_set_proposal_voting_period();
+    assert(gov.get_proposal_voting_period() == 86_400, 'period should update');
+}
+
+/// A proposal voting period above the maximum must revert.
+#[test]
+#[should_panic(expected: ('TooHigh',))]
+fn test_proposal_voting_period_above_max_reverts() {
+    let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
+    let gov = gov_disp(contract);
+    start_cheat_caller_address(contract, admin());
+    gov.propose_set_proposal_voting_period(31_536_001);
+}
+
+// ////////////////////////////////////////////////////////////////
             // CONVICTION POWER & LOCK ACCOUNTING
 // ////////////////////////////////////////////////////////////////
 
@@ -627,6 +680,9 @@ fn test_voting_scales_beyond_old_supporter_cap() {
     // power_total is the exact accumulator: 400 * isqrt(1 * 1e20 wei).
     let expected: u256 = 400 * 10_000_000_000;
     assert(gov.get_proposal_total_power(proposal_id) == expected, 'total power should scale');
+
+    // The minimum voting period must elapse before execution.
+    start_cheat_block_timestamp(contract, FINALIZE_TS + PROPOSAL_VOTING_PERIOD + 1);
 
     // O(1) execution: no supporter-list iteration, threshold check is direct.
     gov.execute_proposal(proposal_id);
@@ -1037,19 +1093,23 @@ fn test_zero_budget_month_slash_decay_and_execution_still_work() {
 
     // A-2: slash a non-revealing juror in a zero-budget month. The slash, the
     // lock release and the stake deduction must apply; only the keeper reward
-    // is skipped (no revert).
+    // is skipped (no revert). The juror's revealed dispute B lock stays held
+    // until finalization (incoherence-slash anti-evasion), so one lock remains.
     start_cheat_caller_address(contract, whale());
     gov.slash_non_revealer(dispute_a, juror());
     assert(gov.get_juror_stake(juror()) == STAKE - STAKE * 3000 / 10000, 'stake slashed');
-    assert(gov.get_juror_open_dispute_count(juror()) == 0, 'lock released');
-    assert(gov.get_juror_locked_stake(juror()) == 0, 'locked cleared');
+    assert(gov.get_juror_open_dispute_count(juror()) == 1, 'reveal lock kept');
+    assert(gov.get_juror_locked_stake(juror()) == STAKE, 'reveal lock held');
     assert(gov.get_month_budget_minted(1) == 0, 'keeper reward skipped');
 
-    // B (candidate) finalizes with score 5: governance minted, bond refunded.
+    // B (candidate) finalizes with score 5: governance minted, bond refunded,
+    // and the revealed juror's remaining lock is released.
     start_cheat_caller_address(contract, whale());
     gov.finalize_selection(dispute_b);
     assert(gov.governance_balance(candidate()) == 50_000 * ONE, 'gov minted');
     assert(tok.balance_of(candidate()) == FUND, 'bond refunded');
+    assert(gov.get_juror_open_dispute_count(juror()) == 0, 'all locks released');
+    assert(gov.get_juror_locked_stake(juror()) == 0, 'locked cleared');
 
     // B-1: a positive-score proposal in a zero-budget month still executes
     // and refunds the author; only the funding payout is skipped.
@@ -1534,4 +1594,448 @@ fn test_fuzz_power_total_matches_sum_of_vote_weights(a: u256, b: u256) {
     assert(gov.get_proposal_total_power(proposal_id) == expected, 'power_total mismatch');
     assert(gov.get_conviction_power(candidate(), cid_a) == isqrt(amt_a), 'a weight mismatch');
     assert(gov.get_conviction_power(candidate(), cid_b) == isqrt(amt_b), 'b weight mismatch');
+}
+
+/// Funds and stakes `n` equal-weight jurors at addresses `base..base+n`.
+fn stake_equal_jurors(contract: ContractAddress, base: u32, n: u32) {
+    let gov = gov_disp(contract);
+    let tok = tok_disp(contract);
+    let mut i: u32 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let a = juror_address(base + i);
+        fund(contract, a, FUND);
+        start_cheat_caller_address(contract, a);
+        tok.approve(a, STAKE);
+        gov.stake(STAKE);
+        i += 1;
+    };
+}
+
+/// Commits, then reveals, one score per address in `base..base+scores.len()`.
+/// Every address must already be a drawn juror for the dispute.
+fn commit_reveal_scores(
+    contract: ContractAddress, dispute_id: u256, base: u32, scores: Array<i8>,
+) {
+    let gov = gov_disp(contract);
+    let count: u32 = scores.len().try_into().unwrap();
+    let mut i: u32 = 0;
+    loop {
+        if i >= count {
+            break;
+        }
+        let a = juror_address(base + i);
+        let score = *scores.at(i.into());
+        let salt: felt252 = 0xbeef;
+        let mut hash_input: Array<felt252> = array![];
+        hash_input.append(score.into());
+        hash_input.append(salt);
+        let commit_hash = poseidon_hash_span(hash_input.span());
+        start_cheat_caller_address(contract, a);
+        start_cheat_block_timestamp(contract, COMMIT_PHASE_TS);
+        gov.commit_vote(dispute_id, commit_hash);
+        i += 1;
+    };
+
+    let mut j: u32 = 0;
+    loop {
+        if j >= count {
+            break;
+        }
+        let a = juror_address(base + j);
+        let score = *scores.at(j.into());
+        let salt: felt252 = 0xbeef;
+        start_cheat_caller_address(contract, a);
+        start_cheat_block_timestamp(contract, REVEAL_PHASE_TS);
+        gov.reveal_vote(dispute_id, score, salt);
+        j += 1;
+    };
+}
+
+// ////////////////////////////////////////////////////////////////
+    // INCOHERENCE SLASHING (minority-attacker penalty)
+// ////////////////////////////////////////////////////////////////
+
+/// A minority attacker who reveals against the majority is slashed at the
+/// configured rate into the slash pool; coherent honest jurors keep their
+/// stake and claim the penalty-funded reward. The candidate's bond is refunded
+/// on the positive score, so the pool holds exactly the incoherence slash.
+#[test]
+fn test_incoherent_minority_is_slashed_and_pool_rewards_coherent() {
+    let contract = deploy_with_capacity(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT, 32_u32);
+    let gov = gov_disp(contract);
+    let tok = tok_disp(contract);
+    start_cheat_block_timestamp(contract, T0);
+
+    // Five equal-weight jurors: four honest (indexes 0-3) reveal +5, the
+    // minority attacker (index 4) reveals -5. All five are drawn.
+    stake_equal_jurors(contract, 70, 5);
+    fund(contract, candidate(), FUND);
+    let dispute_id = request_evaluation(contract);
+    let d = gov.get_dispute(dispute_id);
+    assert(d.unique_juror_count == 5, 'all five jurors drawn');
+
+    let scores: Array<i8> = array![5, 5, 5, 5, -5];
+    commit_reveal_scores(contract, dispute_id, 70, scores);
+
+    start_cheat_block_timestamp(contract, FINALIZE_TS);
+    gov.finalize_selection(dispute_id);
+
+    let d = gov.get_dispute(dispute_id);
+    assert(d.final_score == 5, 'majority score should hold');
+    assert(d.total_coherent_weight > 0, 'honest majority coherent');
+
+    let attacker = juror_address(74);
+    assert(gov.get_juror_stake(attacker) == STAKE * 7000 / 10000, 'attacker stake slashed');
+    assert(tok.balance_of(attacker) == FUND - STAKE, 'tokens stay escrowed');
+
+    let honest = juror_address(70);
+    assert(gov.get_juror_stake(honest) == STAKE, 'honest stake kept');
+    assert(d.slash_pool == STAKE * 3000 / 10000, 'pool holds incoherence slash');
+
+    // A coherent juror claims a reward from the penalty-funded pool.
+    start_cheat_caller_address(contract, honest);
+    let before = tok.balance_of(honest);
+    gov.claim_juror_reward(dispute_id);
+    assert(tok.balance_of(honest) > before, 'coherent juror paid');
+}
+
+/// An `IncoherentJurorSlashed` event is emitted on finalization for the
+/// incoherent juror, carrying the exact amount stripped from their stake.
+#[test]
+fn test_incoherence_slash_emits_event() {
+    let contract = deploy_with_capacity(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT, 32_u32);
+    let gov = gov_disp(contract);
+    start_cheat_block_timestamp(contract, T0);
+
+    stake_equal_jurors(contract, 70, 5);
+    fund(contract, candidate(), FUND);
+    let dispute_id = request_evaluation(contract);
+
+    let scores: Array<i8> = array![5, 5, 5, 5, -5];
+    commit_reveal_scores(contract, dispute_id, 70, scores);
+
+    let mut spy = spy_events();
+    start_cheat_block_timestamp(contract, FINALIZE_TS);
+    gov.finalize_selection(dispute_id);
+
+    let mut slash_events: u32 = 0;
+    let mut correct_juror = false;
+    let mut correct_amount = false;
+    let attacker_felt: felt252 = juror_address(74).into();
+    let expected_amount = STAKE * 3000 / 10000;
+    let received = spy.get_events();
+    for (from, event) in received.events.span() {
+        if *from == contract {
+            let ev = event.clone();
+            if ev.keys.len() > 0 && *ev.keys.at(0) == selector!("IncoherentJurorSlashed") {
+                slash_events += 1;
+                for key in ev.keys.span() {
+                    correct_juror = correct_juror || *key == attacker_felt;
+                };
+                for val in ev.data.span() {
+                    let amount: u256 = (*val).into();
+                    correct_amount = correct_amount || (amount == expected_amount);
+                };
+            };
+        };
+    };
+    assert(slash_events == 1, 'exactly one slash event');
+    assert(correct_juror, 'slash event names attacker');
+    assert(correct_amount, 'slash event carries amount');
+}
+
+/// A hung jury (three +5 against one -5 settle exactly to 0) leaves no juror
+/// within the coherence band, so nobody is slashed and no value strands in an
+/// unclaimable pool. The candidate's bond is refunded on the neutral score.
+#[test]
+fn test_hung_jury_is_not_slashed() {
+    let contract = deploy_with_capacity(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT, 32_u32);
+    let gov = gov_disp(contract);
+    start_cheat_block_timestamp(contract, T0);
+
+    stake_equal_jurors(contract, 50, 4);
+    fund(contract, candidate(), FUND);
+    let dispute_id = request_evaluation(contract);
+    let d = gov.get_dispute(dispute_id);
+    assert(d.unique_juror_count == 4, 'all four jurors drawn');
+
+    let scores: Array<i8> = array![5, 5, 5, -5];
+    commit_reveal_scores(contract, dispute_id, 50, scores);
+
+    start_cheat_block_timestamp(contract, FINALIZE_TS);
+    gov.finalize_selection(dispute_id);
+
+    let d = gov.get_dispute(dispute_id);
+    assert(d.final_score == 0, 'balanced jury is score-neutral');
+    assert(d.total_coherent_weight == 0, 'no coherent majority');
+
+    let mut i: u32 = 0;
+    loop {
+        if i >= 4 {
+            break;
+        }
+        assert(gov.get_juror_stake(juror_address(50 + i)) == STAKE, 'no juror slashed');
+        i += 1;
+    };
+    assert(d.slash_pool == 0, 'no value stranded');
+}
+
+/// A revealing juror's stake stays locked until finalization so an incoherent
+/// reveal cannot be escaped by unstaking; finalization releases it.
+#[test]
+fn test_reveal_lock_persists_until_finalize() {
+    let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
+    let gov = gov_disp(contract);
+    start_cheat_block_timestamp(contract, T0);
+    fund(contract, juror(), FUND);
+    fund(contract, candidate(), FUND);
+
+    stake_juror(contract);
+    let dispute_id = request_evaluation(contract);
+    disclose(contract, dispute_id, 5);
+
+    assert(gov.get_juror_locked_stake(juror()) == STAKE, 'reveal keeps lock');
+    assert(gov.get_juror_open_dispute_count(juror()) == 1, 'reveal keeps open lock');
+
+    finalize(contract, dispute_id);
+    assert(gov.get_juror_locked_stake(juror()) == 0, 'finalize releases lock');
+    assert(gov.get_juror_open_dispute_count(juror()) == 0, 'finalize clears open lock');
+}
+
+/// The revealed stake cannot be withdrawn before the dispute is finalized.
+#[test]
+#[should_panic(expected: ('InsufficientUnlockedStake',))]
+fn test_cannot_unstake_revealed_lock_before_finalize() {
+    let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
+    let gov = gov_disp(contract);
+    start_cheat_block_timestamp(contract, T0);
+    fund(contract, juror(), FUND);
+    fund(contract, candidate(), FUND);
+
+    stake_juror(contract);
+    let dispute_id = request_evaluation(contract);
+    disclose(contract, dispute_id, 5);
+
+    start_cheat_caller_address(contract, juror());
+    gov.unstake(1);
+}
+
+/// An incoherent juror is not part of the coherent set and cannot claim.
+#[test]
+#[should_panic(expected: ('NotCoherent',))]
+fn test_incoherent_juror_cannot_claim() {
+    let contract = deploy_with_capacity(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT, 32_u32);
+    let gov = gov_disp(contract);
+    start_cheat_block_timestamp(contract, T0);
+
+    stake_equal_jurors(contract, 70, 5);
+    fund(contract, candidate(), FUND);
+    let dispute_id = request_evaluation(contract);
+
+    let scores: Array<i8> = array![5, 5, 5, 5, -5];
+    commit_reveal_scores(contract, dispute_id, 70, scores);
+
+    start_cheat_block_timestamp(contract, FINALIZE_TS);
+    gov.finalize_selection(dispute_id);
+
+    start_cheat_caller_address(contract, juror_address(74));
+    gov.claim_juror_reward(dispute_id);
+}
+
+/// The incoherence slash rate defaults to 30% and is timelocked like every
+/// other slash parameter.
+#[test]
+fn test_incoherence_slash_bps_timelocked_change() {
+    let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
+    let gov = gov_disp(contract);
+    assert(gov.get_incoherence_slash_bps() == 3000, 'default should be 3000');
+
+    start_cheat_block_timestamp(contract, T0);
+    start_cheat_caller_address(contract, admin());
+    gov.propose_set_incoherence_slash_bps(1000);
+    start_cheat_block_timestamp(contract, T0 + TIMELOCK_DURATION + 1);
+    gov.execute_set_incoherence_slash_bps();
+    assert(gov.get_incoherence_slash_bps() == 1000, 'rate should update');
+}
+
+/// A proposal above 10,000 basis points must revert.
+#[test]
+#[should_panic(expected: ('TooHigh',))]
+fn test_incoherence_slash_bps_above_max_reverts() {
+    let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
+    let gov = gov_disp(contract);
+    start_cheat_caller_address(contract, admin());
+    gov.propose_set_incoherence_slash_bps(10_001);
+}
+
+/// The coherence band defaults to 1 and is timelocked like every other
+/// parameter.
+#[test]
+fn test_coherence_band_timelocked_change() {
+    let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
+    let gov = gov_disp(contract);
+    assert(gov.get_coherence_band() == 1, 'default should be 1');
+
+    start_cheat_block_timestamp(contract, T0);
+    start_cheat_caller_address(contract, admin());
+    gov.propose_set_coherence_band(3);
+    start_cheat_block_timestamp(contract, T0 + TIMELOCK_DURATION + 1);
+    gov.execute_set_coherence_band();
+    assert(gov.get_coherence_band() == 3, 'band should update');
+}
+
+/// A coherence band above the maximum of 3 must revert.
+#[test]
+#[should_panic(expected: ('TooHigh',))]
+fn test_coherence_band_above_max_reverts() {
+    let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
+    let gov = gov_disp(contract);
+    start_cheat_caller_address(contract, admin());
+    gov.propose_set_coherence_band(4);
+}
+
+// ////////////////////////////////////////////////////////////////
+    // H-4: INCOHERENCE SLASH CAPPED AT CURRENT STAKE
+// ////////////////////////////////////////////////////////////////
+
+/// A juror drawn (and slashed) in several concurrent disputes must never be
+/// charged more than their remaining stake. Without the cap, the fourth
+/// incoherent slash at the default 30% needs 0.3 of a stake that has only 0.1
+/// left, `_apply_juror_slash` reverts with `SlashExceedsStake`, and the whole
+/// `finalize_selection` call bricks — freezing the dispute, the candidate,
+/// governance minting, and every honest juror's lock.
+#[test]
+fn test_incoherence_slash_caps_at_current_stake() {
+    let contract = deploy_with_capacity(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT, 32_u32);
+    let gov = gov_disp(contract);
+    let tok = tok_disp(contract);
+    start_cheat_block_timestamp(contract, T0);
+
+    // Pin the block number below `BLOCK_HASH_LOOKBACK` so `_recent_block_hash`
+    // returns zero, and override the mocked VRF seed. Together these make the
+    // weighted draw fully deterministic: for dispute ids 0-3 all five jurors
+    // are drawn and the attacker (slot 5) is drawn exactly once per dispute.
+    start_cheat_block_number_global(0);
+    start_mock_call::<felt252>(vrf_provider(), selector!("consume_random"), 0x85);
+
+    // Four honest jurors (indexes 70-73) reveal +5, the minority attacker
+    // (index 74) reveals -5. Equal stake, so the attacker is drawn exactly once
+    // per dispute and honest jurors stay coherent; the attacker is incoherent.
+    stake_equal_jurors(contract, 70, 5);
+    fund(contract, candidate(), FUND);
+    let attacker = juror_address(74);
+
+    // Four concurrent disputes, each under its own candidate (one active
+    // dispute per candidate). All draws happen before any slash reduces stake.
+    let c2: ContractAddress = 'candidate2'.try_into().unwrap();
+    let c3: ContractAddress = 'candidate3'.try_into().unwrap();
+    let c4: ContractAddress = 'candidate4'.try_into().unwrap();
+    fund(contract, c2, FUND);
+    fund(contract, c3, FUND);
+    fund(contract, c4, FUND);
+
+    let dispute_id0 = request_evaluation(contract);
+    start_cheat_caller_address(contract, c2);
+    tok.approve(c2, BOND);
+    let dispute_id1 = gov.request_evaluation("evidence 1");
+    start_cheat_caller_address(contract, c3);
+    tok.approve(c3, BOND);
+    let dispute_id2 = gov.request_evaluation("evidence 2");
+    start_cheat_caller_address(contract, c4);
+    tok.approve(c4, BOND);
+    let dispute_id3 = gov.request_evaluation("evidence 3");
+
+    let mut d = gov.get_dispute(dispute_id0);
+    assert(d.unique_juror_count == 5, 'd0 draws all five');
+    d = gov.get_dispute(dispute_id1);
+    assert(d.unique_juror_count == 5, 'd1 draws all five');
+    d = gov.get_dispute(dispute_id2);
+    assert(d.unique_juror_count == 5, 'd2 draws all five');
+    d = gov.get_dispute(dispute_id3);
+    assert(d.unique_juror_count == 5, 'd3 draws all five');
+
+    let scores: Array<i8> = array![5, 5, 5, 5, -5];
+    commit_reveal_scores(contract, dispute_id0, 70, scores);
+    let scores: Array<i8> = array![5, 5, 5, 5, -5];
+    commit_reveal_scores(contract, dispute_id1, 70, scores);
+    let scores: Array<i8> = array![5, 5, 5, 5, -5];
+    commit_reveal_scores(contract, dispute_id2, 70, scores);
+    let scores: Array<i8> = array![5, 5, 5, 5, -5];
+    commit_reveal_scores(contract, dispute_id3, 70, scores);
+
+    // Finalize all four: the cap must prevent any SlashExceedsStake revert.
+    // Applied slashes are 0.3 + 0.3 + 0.3 + 0.1 (capped) of STAKE.
+    start_cheat_block_timestamp(contract, FINALIZE_TS);
+    gov.finalize_selection(dispute_id0);
+    gov.finalize_selection(dispute_id1);
+    gov.finalize_selection(dispute_id2);
+    gov.finalize_selection(dispute_id3);
+
+    assert(gov.get_juror_stake(attacker) == 0, 'attacker stake floors at zero');
+
+    let d0 = gov.get_dispute(dispute_id0);
+    let d1 = gov.get_dispute(dispute_id1);
+    let d2 = gov.get_dispute(dispute_id2);
+    let d3 = gov.get_dispute(dispute_id3);
+    let total_pool = d0.slash_pool + d1.slash_pool + d2.slash_pool + d3.slash_pool;
+    assert(total_pool == STAKE, 'pool holds full capped stake');
+    assert(tok.balance_of(contract) >= 5 * STAKE, 'tokens stay escrowed');
+}
+
+/// At a 100% incoherence slash rate the entire stake is gone on the first
+/// incoherent dispute; a second concurrent dispute must finalize with a zero
+/// slash instead of reverting the whole finalization.
+#[test]
+fn test_incoherence_slash_bps_full_caps_stake() {
+    let contract = deploy_with_capacity(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT, 32_u32);
+    let gov = gov_disp(contract);
+    let tok = tok_disp(contract);
+    start_cheat_block_timestamp(contract, T0);
+    let attacker = juror_address(74);
+
+    // Same deterministic-draw setup as the default-rate test: disputes 0-1 all
+    // draw five jurors with the attacker drawn exactly once.
+    start_cheat_block_number_global(0);
+    start_mock_call::<felt252>(vrf_provider(), selector!("consume_random"), 0x85);
+
+    stake_equal_jurors(contract, 70, 5);
+    fund(contract, candidate(), FUND);
+    let c2: ContractAddress = 'candidate2'.try_into().unwrap();
+    fund(contract, c2, FUND);
+
+    // Both disputes are requested at T0 with full stake, before any slash can
+    // reduce the attacker's balance.
+    let dispute_id0 = request_evaluation(contract);
+    start_cheat_caller_address(contract, c2);
+    tok.approve(c2, BOND);
+    let dispute_id1 = gov.request_evaluation("evidence 1");
+
+    // Raise the incoherence slash to 100% through the 3-day timelock. The rate
+    // is read at finalization time, not draw time.
+    start_cheat_caller_address(contract, admin());
+    start_cheat_block_timestamp(contract, T0);
+    gov.propose_set_incoherence_slash_bps(10_000);
+    start_cheat_block_timestamp(contract, T0 + TIMELOCK_DURATION + 1);
+    gov.execute_set_incoherence_slash_bps();
+    assert(gov.get_incoherence_slash_bps() == 10_000, 'full-rate slash active');
+
+    let scores: Array<i8> = array![5, 5, 5, 5, -5];
+    commit_reveal_scores(contract, dispute_id0, 70, scores);
+    let scores: Array<i8> = array![5, 5, 5, 5, -5];
+    commit_reveal_scores(contract, dispute_id1, 70, scores);
+
+    // First finalization consumes the attacker's entire stake (100% rate).
+    start_cheat_block_timestamp(contract, FINALIZE_TS);
+    gov.finalize_selection(dispute_id0);
+    assert(gov.get_juror_stake(attacker) == 0, 'first dispute zeroes stake');
+
+    // Second concurrent dispute: the raw slash would be a full STAKE but
+    // nothing remains, so finalization must not revert and must slash zero.
+    gov.finalize_selection(dispute_id1);
+    assert(gov.get_juror_stake(attacker) == 0, 'stake stays at zero');
+    let d1 = gov.get_dispute(dispute_id1);
+    assert(d1.slash_pool == 0, 'no stake left for second pool');
 }
