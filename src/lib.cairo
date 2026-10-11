@@ -45,8 +45,9 @@
 //!   (`lock_duration = level * conviction_base_lock`) during which the
 //!   stake is frozen. While the conviction is live (`now < created_at +
 //!   lock_duration`) it may vote on up to `max_votes_per_conviction`
-//!   distinct proposals, each time casting a score in [-5, +5]. Voting
-//!   power for a vote is STATIC (frozen at vote time):
+//!   distinct proposals, each time casting a score in [-5, +5]. A proposal's
+//!   author cannot vote on their own proposal (`SelfVotingNotAllowed`).
+//!   Voting power for a vote is STATIC (frozen at vote time):
 //!       weight = isqrt(level * locked_amount)
 //!   so a conviction's power never grows or decays with lock time and
 //!   cannot be re-arbitraged after the votes are cast.
@@ -129,6 +130,12 @@
 //!   Refunded on score zero or positive (`final_score >= 0`), otherwise
 //!   added to `slash_pool`.
 //! * One open request at a time per candidate.
+//! * Reapply cooldown: after an evaluation is finalized, the candidate must
+//!   wait `evaluation_cooldown` (admin-timelocked, default two 30-day months,
+//!   max one year) before calling `request_evaluation` again
+//!   (`EvaluationCooldown`). This throttles farming of non-transferable
+//!   governance tokens through back-to-back evaluations. A candidate who has
+//!   never been evaluated (timestamp zero) is unaffected.
 //!
 //! INCOHERENCE SLASHING (Schelling-game penalty)
 //! ---------------------------------------------
@@ -153,6 +160,8 @@
 //!   (`LockExpired`), where `lock_duration = level * conviction_base_lock`.
 //! * A live conviction may vote on up to `max_votes_per_conviction` distinct
 //!   proposals (never the same proposal twice) before `release_conviction`.
+//! * A proposal's author cannot vote on their own proposal
+//!   (`SelfVotingNotAllowed`).
 //! * Multiple convictions per holder are allowed (each with own level).
 //! * No per-proposal supporter registry: `FundingProposal.power_total` is the
 //!   frozen accumulator at vote time, so voting is unbounded and
@@ -214,8 +223,9 @@ pub trait IStakeholderConviction<TContractState> {
     /// The contract records the dispute, draws weighted jurors with replacement,
     /// snapshots their stakes into dispute locks, and emits `DisputeCreated`,
     /// `EvaluationRequested`, and one `JurorDrawn` event per draw. Reverts for
-    /// an active dispute, invalid evidence, failed bond transfer, no staked
-    /// weight, or exhausted redraw attempts..
+    /// an active dispute, an open reapply cooldown (`EvaluationCooldown`),
+    /// invalid evidence, failed bond transfer, no staked weight, or exhausted
+    /// redraw attempts..
     fn request_evaluation(ref self: TContractState, evidence: ByteArray) -> u256;
 
     /// Stores a drawer's Poseidon commitment for a dispute vote.
@@ -289,8 +299,9 @@ pub trait IStakeholderConviction<TContractState> {
     /// Permanently records one score vote from a live conviction on a proposal.
     /// The conviction must belong to the caller, remain inside its lock window,
     /// have not voted on this proposal before, and remain below the configured
-    /// distinct-vote limit. The static weight is added to the score histogram
-    /// and the proposal's O(1) `power_total` accumulator.
+    /// distinct-vote limit. A proposal's author cannot vote on their own
+    /// proposal. The static weight is added to the score histogram and the
+    /// proposal's O(1) `power_total` accumulator.
     fn vote_with_conviction(
         ref self: TContractState, proposal_id: u256, conviction_id: u32, score: i8,
     );
@@ -561,6 +572,23 @@ pub trait IStakeholderConviction<TContractState> {
 
     /// Returns the current minimum funding-proposal voting period in seconds.
     fn get_proposal_voting_period(self: @TContractState) -> u64;
+
+    /// Proposes the cooldown a candidate must wait after a finalized evaluation
+    /// before reapplying, in seconds. The value must be positive and no greater
+    /// than `MAX_EVALUATION_COOLDOWN`.
+    fn propose_set_evaluation_cooldown(ref self: TContractState, duration: u64);
+
+    /// Executes the pending evaluation-cooldown change after its timelock.
+    fn execute_set_evaluation_cooldown(ref self: TContractState);
+
+    /// Returns the current evaluation cooldown in seconds.
+    fn get_evaluation_cooldown(self: @TContractState) -> u64;
+
+    /// Returns the timestamp of a candidate's most recent finalized evaluation,
+    /// or zero if the candidate has never been evaluated.
+    fn get_last_evaluation_finalized(
+        self: @TContractState, candidate: starknet::ContractAddress,
+    ) -> u64;
 
     /// Proposes the monthly inflation rate in basis points, up to
     /// `MAX_INFLATION_BPS`.
@@ -864,6 +892,13 @@ pub mod StakeholderConviction {
         has_active_dispute: Map<ContractAddress, bool>,
         /// Stored active-dispute ID for each candidate.
         active_dispute_for_candidate: Map<ContractAddress, u256>,
+        /// Timestamp at which a candidate's most recent evaluation was
+        /// finalized; the candidate must wait `evaluation_cooldown` before
+        /// requesting another evaluation. Zero means "never evaluated".
+        last_evaluation_finalized: Map<ContractAddress, u64>,
+        /// Current cooldown (seconds) required between a candidate's finalized
+        /// evaluation and their next evaluation request.
+        evaluation_cooldown: u64,
 
         // ---- non-transferable governance tokens ----
 
@@ -1058,6 +1093,7 @@ pub mod StakeholderConviction {
         self.conviction_base_lock.write(DEFAULT_CONVICTION_BASE_LOCK);
         self.max_votes_per_conviction.write(DEFAULT_MAX_VOTES_PER_CONVICTION);
         self.proposal_voting_period.write(DEFAULT_PROPOSAL_VOTING_PERIOD);
+        self.evaluation_cooldown.write(DEFAULT_EVALUATION_COOLDOWN);
 
         // Timelocked admin parameters
         self.evaluation_bond_amount.write(evaluation_bond_amount);
@@ -1156,6 +1192,18 @@ pub mod StakeholderConviction {
 
             let candidate = get_caller_address();
             assert(!self.has_active_dispute.entry(candidate).read(), 'AlreadyUnderEvaluation');
+
+            // Reapply cooldown: a candidate must wait for the configured period
+            // after their previous evaluation was finalized before requesting
+            // another one. This throttles farming of non-transferable governance
+            // tokens through back-to-back evaluations.
+            let last_evaluation = self.last_evaluation_finalized.entry(candidate).read();
+            if last_evaluation != 0 {
+                let cooldown = self.evaluation_cooldown.read();
+                assert(
+                    get_block_timestamp() >= last_evaluation + cooldown, 'EvaluationCooldown',
+                );
+            }
 
             let bond_amount = self.evaluation_bond_amount.read();
             self.erc20._transfer(candidate, get_contract_address(), bond_amount);
@@ -1415,6 +1463,10 @@ pub mod StakeholderConviction {
                 if requester.is_non_zero() {
                     self.has_active_dispute.entry(requester).write(false);
                     self.active_dispute_for_candidate.entry(requester).write(0);
+                    self
+                        .last_evaluation_finalized
+                        .entry(requester)
+                        .write(get_block_timestamp());
                 }
                 if bond_to_refund > 0 {
                     self.erc20._transfer(get_contract_address(), requester, bond_to_refund);
@@ -1582,6 +1634,7 @@ pub mod StakeholderConviction {
             d.bond_settled = true;
             if requester.is_non_zero() {
                 self.has_active_dispute.entry(requester).write(false);
+                self.last_evaluation_finalized.entry(requester).write(get_block_timestamp());
             }
 
             self.disputes.entry(dispute_id).write(d);
@@ -1753,6 +1806,7 @@ pub mod StakeholderConviction {
             assert(!p.final_score_set, 'AlreadyFinalized');
 
             let caller = get_caller_address();
+            assert(p.author != caller, 'SelfVotingNotAllowed');
             let mut c = self.convictions.entry((caller, conviction_id)).read();
             assert(c.owner == caller, 'Unauthorized');
             assert(!c.released, 'ConvictionReleased');
@@ -2281,6 +2335,28 @@ let caller = get_caller_address();
 
         fn get_proposal_voting_period(self: @ContractState) -> u64 {
             self.proposal_voting_period.read()
+        }
+
+        fn propose_set_evaluation_cooldown(ref self: ContractState, duration: u64) {
+            assert(duration > 0, 'InvalidDuration');
+            assert(duration <= MAX_EVALUATION_COOLDOWN, 'TooHigh');
+            self._propose_change(PARAM_EVALUATION_COOLDOWN, duration.into());
+        }
+
+        fn execute_set_evaluation_cooldown(ref self: ContractState) {
+            let value = self._execute_change(PARAM_EVALUATION_COOLDOWN);
+            let value_u64: u64 = value.try_into().unwrap();
+            self.evaluation_cooldown.write(value_u64);
+        }
+
+        fn get_evaluation_cooldown(self: @ContractState) -> u64 {
+            self.evaluation_cooldown.read()
+        }
+
+        fn get_last_evaluation_finalized(
+            self: @ContractState, candidate: ContractAddress,
+        ) -> u64 {
+            self.last_evaluation_finalized.entry(candidate).read()
         }
 
         fn propose_set_inflation_rate_bps(ref self: ContractState, bps: u16) {

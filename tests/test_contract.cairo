@@ -367,6 +367,87 @@ fn test_negative_score_slashes_bond_and_mints_nothing() {
 }
 
 // ////////////////////////////////////////////////////////////////
+        // STAGE 2B: EVALUATION REAPPLY COOLDOWN
+// ////////////////////////////////////////////////////////////////
+
+/// Verifies the constructor installs the two-month default reapply cooldown.
+#[test]
+fn test_default_evaluation_cooldown() {
+    let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
+    let gov = gov_disp(contract);
+    assert(gov.get_evaluation_cooldown() == 2 * MONTH_SECONDS, 'default cooldown should be 2m');
+}
+
+/// Verifies a candidate cannot reapply while the cooldown window is open.
+#[should_panic(expected: ('EvaluationCooldown',))]
+#[test]
+fn test_evaluation_cooldown_blocks_immediate_reapply() {
+    let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
+    evaluate(contract, 5);
+
+    // The evaluation finalized at FINALIZE_TS; requesting another evaluation
+    // immediately (well inside the two-month cooldown) must revert.
+    let gov = gov_disp(contract);
+    start_cheat_caller_address(contract, candidate());
+    gov.request_evaluation("second evidence");
+}
+
+/// Verifies the cooldown is measured from finalization and clears the gate once elapsed.
+#[test]
+fn test_evaluation_cooldown_elapses_allows_reapply() {
+    let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
+    evaluate(contract, 5);
+
+    let gov = gov_disp(contract);
+    assert(gov.get_last_evaluation_finalized(candidate()) == FINALIZE_TS, 'finalize ts recorded');
+
+    // Move past finalization + the full cooldown; the candidate may reapply.
+    start_cheat_block_timestamp(contract, FINALIZE_TS + 2 * MONTH_SECONDS + 1);
+    start_cheat_caller_address(contract, candidate());
+    tok_disp(contract).approve(candidate(), BOND);
+    let new_dispute = gov.request_evaluation("second evidence");
+
+    assert(gov.get_active_dispute_for_candidate(candidate()) == new_dispute, 'reapply should open');
+    assert(gov.get_last_evaluation_finalized(candidate()) == FINALIZE_TS, 'timestamp unchanged');
+}
+
+/// Verifies an address that has never been evaluated reports a zero timestamp.
+#[test]
+fn test_last_evaluation_finalized_zero_before_any_evaluation() {
+    let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
+    let gov = gov_disp(contract);
+    assert(gov.get_last_evaluation_finalized(candidate()) == 0, 'no prior evaluation');
+    assert(gov.get_last_evaluation_finalized(creator()) == 0, 'no prior evaluation');
+}
+
+/// Verifies the cooldown can be changed through the three-day timelock.
+#[test]
+fn test_evaluation_cooldown_timelocked_change() {
+    let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
+    let gov = gov_disp(contract);
+
+    start_cheat_block_timestamp(contract, T0 + TIMELOCK_DURATION + 1);
+    start_cheat_caller_address(contract, admin());
+    gov.propose_set_evaluation_cooldown(86_400);
+
+    start_cheat_block_timestamp(contract, T0 + 2 * TIMELOCK_DURATION + 1);
+    gov.execute_set_evaluation_cooldown();
+    assert(gov.get_evaluation_cooldown() == 86_400, 'cooldown should update');
+}
+
+/// Verifies a cooldown above one year is rejected at proposal time.
+#[should_panic(expected: ('TooHigh',))]
+#[test]
+fn test_evaluation_cooldown_above_max_reverts() {
+    let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
+    let gov = gov_disp(contract);
+
+    start_cheat_block_timestamp(contract, T0 + TIMELOCK_DURATION + 1);
+    start_cheat_caller_address(contract, admin());
+    gov.propose_set_evaluation_cooldown(31_536_001);
+}
+
+// ////////////////////////////////////////////////////////////////
     // STAGE 3: CONVICTION VOTING + SCORE-BASED REWARDS
 // ////////////////////////////////////////////////////////////////
 
@@ -719,6 +800,22 @@ fn test_single_conviction_votes_on_multiple_proposals() {
     assert(gov.get_proposal_total_power(p1) == 31_622_776_601, 'p1 power mismatch');
     assert(gov.get_conviction_power(candidate(), conviction_id) == 31_622_776_601,
         'conviction power mismatch');
+}
+
+/// Verifies that a proposal's author cannot cast a conviction vote on their own
+/// proposal, which would let them self-support and inflate its frozen power.
+#[should_panic(expected: ('SelfVotingNotAllowed',))]
+#[test]
+fn test_author_cannot_vote_on_own_proposal() {
+    let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
+    evaluate(contract, 5);
+
+    let gov = gov_disp(contract);
+    let proposal_id = create_proposal(contract, funding_wallet(), "proposal evidence");
+
+    // `creator()` authored the proposal; even a well-formed vote must revert.
+    start_cheat_caller_address(contract, creator());
+    gov.vote_with_conviction(proposal_id, 0, 5);
 }
 
 /// Verifies enforcement of the per-conviction distinct-proposal vote limit.

@@ -99,6 +99,12 @@ pub const MAX_MAX_VOTES_PER_CONVICTION: u64 = 1000;
 pub const DEFAULT_PROPOSAL_VOTING_PERIOD: u64 = 604_800;
 /// Maximum configurable funding-proposal voting period in seconds (one year).
 pub const MAX_PROPOSAL_VOTING_PERIOD: u64 = 31_536_000;
+/// Default cooldown a candidate must wait after a finalized evaluation before
+/// they may reapply (request another evaluation), in seconds (two 30-day
+/// months).
+pub const DEFAULT_EVALUATION_COOLDOWN: u64 = 5_184_000;
+/// Maximum configurable evaluation cooldown in seconds (one year).
+pub const MAX_EVALUATION_COOLDOWN: u64 = 31_536_000;
 
 /// Number of calendar months used when annualizing inflation.
 pub const MONTHS_PER_YEAR: u64 = 12;
@@ -159,3 +165,5 @@ pub const PARAM_CONVICTION_BASE_LOCK: felt252 = 'CONVICTION_BASE_LOCK';
 pub const PARAM_MAX_VOTES_PER_CONVICTION: felt252 = 'MAX_VOTES_CONVICTION';
 /// Storage key for the minimum funding-proposal voting period.
 pub const PARAM_PROPOSAL_VOTING_PERIOD: felt252 = 'PROPOSAL_VOTE_WINDOW';
+/// Storage key for the evaluation cooldown before a candidate may reapply.
+pub const PARAM_EVALUATION_COOLDOWN: felt252 = 'EVAL_COOLDOWN';
