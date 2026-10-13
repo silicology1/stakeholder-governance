@@ -24,10 +24,10 @@ pub const DEFAULT_INCOHERENCE_SLASH_BPS: u16 = 3000;
 /// Denominator for values expressed in basis points.
 pub const BPS_DENOM: u256 = 10_000;
 
-/// Default duration of the commitment phase in seconds (one day).
-pub const DEFAULT_COMMIT_DURATION: u64 = 86_400;
-/// Default duration of the reveal phase in seconds (one day).
-pub const DEFAULT_REVEAL_DURATION: u64 = 86_400;
+/// Default duration of the commitment phase in seconds (three days).
+pub const DEFAULT_COMMIT_DURATION: u64 = 259_200;
+/// Default duration of the reveal phase in seconds (three days).
+pub const DEFAULT_REVEAL_DURATION: u64 = 259_200;
 
 /// Dispute phase value indicating that jurors may commit votes.
 pub const PHASE_COMMIT: u8 = 1;

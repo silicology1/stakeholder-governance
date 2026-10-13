@@ -55,12 +55,16 @@ const FUND: u256 = 1_000 * ONE;
 
 /// Base timestamp for deterministic phase transitions.
 const T0: u64 = 1_000_000;
+/// Default duration of the commit phase in seconds (three days).
+const COMMIT_DURATION: u64 = 259_200;
+/// Default duration of the reveal phase in seconds (three days).
+const REVEAL_DURATION: u64 = 259_200;
 /// Timestamp at which the fixture commits its sole vote.
 const COMMIT_PHASE_TS: u64 = T0 + 100;
-/// Timestamp after the one-day commit deadline and during reveal.
-const REVEAL_PHASE_TS: u64 = T0 + 86_401;
-/// Timestamp after the one-day reveal deadline and eligible for finalization.
-const FINALIZE_TS: u64 = T0 + 172_801;
+/// Timestamp after the three-day commit deadline and during reveal.
+const REVEAL_PHASE_TS: u64 = T0 + COMMIT_DURATION + 1;
+/// Timestamp after the three-day reveal deadline and eligible for finalization.
+const FINALIZE_TS: u64 = T0 + COMMIT_DURATION + REVEAL_DURATION + 1;
 /// Three-day delay enforced by parameter-change proposals.
 const TIMELOCK_DURATION: u64 = 259_200;
 /// Default minimum proposal voting period before execution.
@@ -293,9 +297,9 @@ fn test_fifty_staked_jurors_participate_in_weighted_draw() {
 
     fund(contract, candidate(), FUND);
     start_cheat_caller_address(contract, admin());
-    gov.propose_set_num_draws(JUROR_COUNT);
+    gov.propose_param_change('NUM_DRAWS', JUROR_COUNT.into());
     start_cheat_block_timestamp(contract, T0 + TIMELOCK_DURATION);
-    gov.execute_set_num_draws();
+    gov.execute_param_change('NUM_DRAWS');
     assert(gov.get_num_draws() == JUROR_COUNT, 'num draws should be configured');
 
     start_cheat_caller_address(contract, candidate());
@@ -428,10 +432,10 @@ fn test_evaluation_cooldown_timelocked_change() {
 
     start_cheat_block_timestamp(contract, T0 + TIMELOCK_DURATION + 1);
     start_cheat_caller_address(contract, admin());
-    gov.propose_set_evaluation_cooldown(86_400);
+    gov.propose_param_change('EVAL_COOLDOWN', 86_400);
 
     start_cheat_block_timestamp(contract, T0 + 2 * TIMELOCK_DURATION + 1);
-    gov.execute_set_evaluation_cooldown();
+    gov.execute_param_change('EVAL_COOLDOWN');
     assert(gov.get_evaluation_cooldown() == 86_400, 'cooldown should update');
 }
 
@@ -444,7 +448,7 @@ fn test_evaluation_cooldown_above_max_reverts() {
 
     start_cheat_block_timestamp(contract, T0 + TIMELOCK_DURATION + 1);
     start_cheat_caller_address(contract, admin());
-    gov.propose_set_evaluation_cooldown(31_536_001);
+    gov.propose_param_change('EVAL_COOLDOWN', 31_536_001);
 }
 
 // ////////////////////////////////////////////////////////////////
@@ -621,9 +625,9 @@ fn test_proposal_voting_period_timelocked_change() {
 
     start_cheat_block_timestamp(contract, T0);
     start_cheat_caller_address(contract, admin());
-    gov.propose_set_proposal_voting_period(86_400);
+    gov.propose_param_change('PROPOSAL_VOTE_WINDOW', 86_400);
     start_cheat_block_timestamp(contract, T0 + TIMELOCK_DURATION + 1);
-    gov.execute_set_proposal_voting_period();
+    gov.execute_param_change('PROPOSAL_VOTE_WINDOW');
     assert(gov.get_proposal_voting_period() == 86_400, 'period should update');
 }
 
@@ -634,7 +638,7 @@ fn test_proposal_voting_period_above_max_reverts() {
     let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
     let gov = gov_disp(contract);
     start_cheat_caller_address(contract, admin());
-    gov.propose_set_proposal_voting_period(31_536_001);
+    gov.propose_param_change('PROPOSAL_VOTE_WINDOW', 31_536_001);
 }
 
 // ////////////////////////////////////////////////////////////////
@@ -913,14 +917,14 @@ fn test_num_draws_default_and_timelocked_change() {
 
     start_cheat_block_timestamp(contract, T0);
     start_cheat_caller_address(contract, admin());
-    gov.propose_set_num_draws(12);
+    gov.propose_param_change('NUM_DRAWS', 12);
 
     let pending = gov.get_pending_change('NUM_DRAWS');
     assert(pending.exists, 'change should be pending');
     assert(pending.new_value == 12, 'pending value mismatch');
 
     start_cheat_block_timestamp(contract, T0 + TIMELOCK_DURATION + 1);
-    gov.execute_set_num_draws();
+    gov.execute_param_change('NUM_DRAWS');
 
     assert(gov.get_num_draws() == 12, 'num_draws should update');
 
@@ -941,14 +945,14 @@ fn test_conviction_base_lock_timelocked_change() {
 
     start_cheat_block_timestamp(contract, T0);
     start_cheat_caller_address(contract, admin());
-    gov.propose_set_conviction_base_lock(2 * 9_460_800);
+    gov.propose_param_change('CONVICTION_BASE_LOCK', 2 * 9_460_800);
 
     let pending = gov.get_pending_change('CONVICTION_BASE_LOCK');
     assert(pending.exists, 'change should be pending');
     assert(pending.new_value == 2 * 9_460_800, 'pending value mismatch');
 
     start_cheat_block_timestamp(contract, T0 + TIMELOCK_DURATION + 1);
-    gov.execute_set_conviction_base_lock();
+    gov.execute_param_change('CONVICTION_BASE_LOCK');
 
     assert(gov.get_conviction_base_lock() == 2 * 9_460_800, 'base lock updated');
 }
@@ -966,14 +970,14 @@ fn test_max_votes_per_conviction_timelocked_change() {
 
     start_cheat_block_timestamp(contract, T0);
     start_cheat_caller_address(contract, admin());
-    gov.propose_set_max_votes_per_conviction(25);
+    gov.propose_param_change('MAX_VOTES_CONVICTION', 25);
 
     let pending = gov.get_pending_change('MAX_VOTES_CONVICTION');
     assert(pending.exists, 'change should be pending');
     assert(pending.new_value == 25, 'pending value mismatch');
 
     start_cheat_block_timestamp(contract, T0 + TIMELOCK_DURATION + 1);
-    gov.execute_set_max_votes_per_conviction();
+    gov.execute_param_change('MAX_VOTES_CONVICTION');
 
     assert(gov.get_max_votes_per_conviction() == 25, 'max votes updated');
 }
@@ -989,7 +993,7 @@ fn test_propose_conviction_base_lock_above_max_reverts() {
 
     // MAX_LOCK_DURATION is 5 years (157,680,000 s).
     start_cheat_caller_address(contract, admin());
-    gov.propose_set_conviction_base_lock(157_680_001);
+    gov.propose_param_change('CONVICTION_BASE_LOCK', 157_680_001);
 }
 
 /// Verifies that a conviction cannot create a lock exceeding the absolute cap.
@@ -1006,10 +1010,10 @@ fn test_create_conviction_lock_too_long_reverts() {
     // Raise the per-level base lock to the 5-year cap; level 2 then exceeds it.
     start_cheat_block_timestamp(contract, T0);
     start_cheat_caller_address(contract, admin());
-    gov.propose_set_conviction_base_lock(157_680_000);
+    gov.propose_param_change('CONVICTION_BASE_LOCK', 157_680_000);
 
     start_cheat_block_timestamp(contract, T0 + TIMELOCK_DURATION + 1);
-    gov.execute_set_conviction_base_lock();
+    gov.execute_param_change('CONVICTION_BASE_LOCK');
 
     start_cheat_caller_address(contract, candidate());
     gov.create_conviction(2, 1_000 * ONE);
@@ -1027,10 +1031,10 @@ fn test_execute_param_change_before_timelock_reverts() {
 
     start_cheat_block_timestamp(contract, T0);
     start_cheat_caller_address(contract, admin());
-    gov.propose_set_evaluation_bond_amount(70 * ONE);
+    gov.propose_param_change('EVAL_BOND_AMT', 70 * ONE);
 
     start_cheat_block_timestamp(contract, T0 + 100);
-    gov.execute_set_evaluation_bond_amount();
+    gov.execute_param_change('EVAL_BOND_AMT');
 }
 
 /// Verifies that a timelocked evaluation-bond update becomes effective.
@@ -1046,7 +1050,7 @@ fn test_evaluation_bond_timelocked_change_takes_effect() {
 
     start_cheat_block_timestamp(contract, T0);
     start_cheat_caller_address(contract, admin());
-    gov.propose_set_evaluation_bond_amount(70 * ONE);
+    gov.propose_param_change('EVAL_BOND_AMT', 70 * ONE);
 
     let pending = gov.get_pending_change('EVAL_BOND_AMT');
     assert(pending.exists, 'change should be pending');
@@ -1054,7 +1058,7 @@ fn test_evaluation_bond_timelocked_change_takes_effect() {
     assert(pending.effective_at == T0 + TIMELOCK_DURATION, 'effective_at mismatch');
 
     start_cheat_block_timestamp(contract, T0 + TIMELOCK_DURATION + 1);
-    gov.execute_set_evaluation_bond_amount();
+    gov.execute_param_change('EVAL_BOND_AMT');
 
     assert(gov.get_evaluation_bond_amount() == 70 * ONE, 'bond updates after timelock');
 }
@@ -1177,9 +1181,9 @@ fn test_zero_budget_month_slash_decay_and_execution_still_work() {
     // Set inflation to 0 (7-day-safe 3-day timelock) so month 1 budget = 0.
     start_cheat_block_timestamp(contract, T0 + TIMELOCK_DURATION + 1);
     start_cheat_caller_address(contract, admin());
-    gov.propose_set_inflation_rate_bps(0);
+    gov.propose_param_change('INFLATION_RATE', 0);
     start_cheat_block_timestamp(contract, T0 + 2 * TIMELOCK_DURATION + 1);
-    gov.execute_set_inflation_rate_bps();
+    gov.execute_param_change('INFLATION_RATE');
 
     // Roll into month 1: budget is 0 (inflation 0, no prior burns).
     start_cheat_block_timestamp(contract, MONTH_SECONDS + 1);
@@ -1295,7 +1299,7 @@ fn test_zero_conviction_threshold_reverts() {
     let gov = gov_disp(contract);
 
     start_cheat_caller_address(contract, admin());
-    gov.propose_set_conviction_threshold(0);
+    gov.propose_param_change('CONVICTION_THRESHOLD', 0);
 }
 
 /// Verifies that recorded burns increase the following month's budget.
@@ -1356,14 +1360,14 @@ fn test_inflation_rate_timelocked_change() {
 
     start_cheat_block_timestamp(contract, T0);
     start_cheat_caller_address(contract, admin());
-    gov.propose_set_inflation_rate_bps(300);
+    gov.propose_param_change('INFLATION_RATE', 300);
 
     let pending = gov.get_pending_change('INFLATION_RATE');
     assert(pending.exists, 'change should be pending');
     assert(pending.new_value == 300, 'pending value mismatch');
 
     start_cheat_block_timestamp(contract, T0 + TIMELOCK_DURATION + 1);
-    gov.execute_set_inflation_rate_bps();
+    gov.execute_param_change('INFLATION_RATE');
 
     assert(gov.get_inflation_rate_bps() == 300, 'rate updated');
 }
@@ -1378,7 +1382,7 @@ fn test_inflation_rate_above_max_reverts() {
     let gov = gov_disp(contract);
 
     start_cheat_caller_address(contract, admin());
-    gov.propose_set_inflation_rate_bps(501);
+    gov.propose_param_change('INFLATION_RATE', 501);
 }
 
 // ////////////////////////////////////////////////////////////////
@@ -1468,7 +1472,7 @@ fn test_num_draws_above_max_reverts() {
 
     start_cheat_block_timestamp(contract, T0);
     start_cheat_caller_address(contract, admin());
-    gov.propose_set_num_draws(101);
+    gov.propose_param_change('NUM_DRAWS', 101);
 }
 
 // M3: u256 admin parameters are capped at MAX_SUPPLY.
@@ -1484,7 +1488,7 @@ fn test_param_amount_above_max_supply_reverts() {
 
     start_cheat_block_timestamp(contract, T0);
     start_cheat_caller_address(contract, admin());
-    gov.propose_set_conviction_threshold(MAX_SUPPLY_ONE + 1);
+    gov.propose_param_change('CONVICTION_THRESHOLD', MAX_SUPPLY_ONE + 1);
 }
 
 // L1: a contract untouched for many months clamps the rollover instead of
@@ -1952,9 +1956,9 @@ fn test_incoherence_slash_bps_timelocked_change() {
 
     start_cheat_block_timestamp(contract, T0);
     start_cheat_caller_address(contract, admin());
-    gov.propose_set_incoherence_slash_bps(1000);
+    gov.propose_param_change('INCOHERENCE_SLASH_BPS', 1000);
     start_cheat_block_timestamp(contract, T0 + TIMELOCK_DURATION + 1);
-    gov.execute_set_incoherence_slash_bps();
+    gov.execute_param_change('INCOHERENCE_SLASH_BPS');
     assert(gov.get_incoherence_slash_bps() == 1000, 'rate should update');
 }
 
@@ -1965,7 +1969,7 @@ fn test_incoherence_slash_bps_above_max_reverts() {
     let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
     let gov = gov_disp(contract);
     start_cheat_caller_address(contract, admin());
-    gov.propose_set_incoherence_slash_bps(10_001);
+    gov.propose_param_change('INCOHERENCE_SLASH_BPS', 10_001);
 }
 
 /// The coherence band defaults to 1 and is timelocked like every other
@@ -1978,9 +1982,9 @@ fn test_coherence_band_timelocked_change() {
 
     start_cheat_block_timestamp(contract, T0);
     start_cheat_caller_address(contract, admin());
-    gov.propose_set_coherence_band(3);
+    gov.propose_param_change('COHERENCE_BAND', 3);
     start_cheat_block_timestamp(contract, T0 + TIMELOCK_DURATION + 1);
-    gov.execute_set_coherence_band();
+    gov.execute_param_change('COHERENCE_BAND');
     assert(gov.get_coherence_band() == 3, 'band should update');
 }
 
@@ -1991,7 +1995,7 @@ fn test_coherence_band_above_max_reverts() {
     let contract = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
     let gov = gov_disp(contract);
     start_cheat_caller_address(contract, admin());
-    gov.propose_set_coherence_band(4);
+    gov.propose_param_change('COHERENCE_BAND', 4);
 }
 
 // ////////////////////////////////////////////////////////////////
@@ -2114,9 +2118,9 @@ fn test_incoherence_slash_bps_full_caps_stake() {
     // is read at finalization time, not draw time.
     start_cheat_caller_address(contract, admin());
     start_cheat_block_timestamp(contract, T0);
-    gov.propose_set_incoherence_slash_bps(10_000);
+    gov.propose_param_change('INCOHERENCE_SLASH_BPS', 10_000);
     start_cheat_block_timestamp(contract, T0 + TIMELOCK_DURATION + 1);
-    gov.execute_set_incoherence_slash_bps();
+    gov.execute_param_change('INCOHERENCE_SLASH_BPS');
     assert(gov.get_incoherence_slash_bps() == 10_000, 'full-rate slash active');
 
     let scores: Array<i8> = array![5, 5, 5, 5, -5];

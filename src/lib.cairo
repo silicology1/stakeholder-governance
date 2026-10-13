@@ -429,157 +429,36 @@ pub trait IStakeholderConviction<TContractState> {
 
     // ---- admin: timelocked parameter changes ----
 
-    /// Proposes a new evaluation bond. Only the default admin may call it; the
-    /// amount must be positive and no greater than `MAX_SUPPLY`. The change
-    /// becomes executable after `TIMELOCK_DURATION`.
-    fn propose_set_evaluation_bond_amount(ref self: TContractState, amount: u256);
+    /// Proposes an ordinary timelocked parameter change. Only the default
+    /// admin may call it. `param_key` is one of the `PARAM_*` keys; `new_value`
+    /// is the value encoded as a `u256` (addresses are felt-encoded). The pair
+    /// is validated against that parameter's bounds before being recorded, and
+    /// the change becomes executable after `TIMELOCK_DURATION`.
+    fn propose_param_change(ref self: TContractState, param_key: felt252, new_value: u256);
 
-    /// Executes the pending evaluation-bond change after its timelock.
-    fn execute_set_evaluation_bond_amount(ref self: TContractState);
-
-    /// Proposes a new proposal reputation deposit, subject to the same admin
-    /// authorization, positive-value check, supply cap, and three-day timelock.
-    fn propose_set_reputation_stake(ref self: TContractState, amount: u256);
-
-    /// Executes the pending reputation-deposit change after its timelock.
-    fn execute_set_reputation_stake(ref self: TContractState);
-
-    /// Proposes the minimum proposal voting power required for execution.
-    /// The threshold must be positive and no greater than `MAX_SUPPLY`.
-    fn propose_set_conviction_threshold(ref self: TContractState, threshold: u256);
-
-    /// Executes the pending conviction-threshold change after its timelock.
-    fn execute_set_conviction_threshold(ref self: TContractState);
-
-    /// Proposes the reward multiplier for final scores 4 through 5.
-    fn propose_set_reward_multiplier(ref self: TContractState, amount: u256);
-
-    /// Executes the pending score-4-to-5 reward multiplier after its timelock.
-    fn execute_set_reward_multiplier(ref self: TContractState);
-
-    /// Proposes the reward multiplier for final scores 1 through 3.
-    fn propose_set_mini_reward_multiplier(ref self: TContractState, amount: u256);
-
-    /// Executes the pending score-1-to-3 reward multiplier after its timelock.
-    fn execute_set_mini_reward_multiplier(ref self: TContractState);
-
-    /// Proposes a non-zero Cartridge VRF provider address.
-    /// The address is encoded as a felt value and becomes active after the
-    /// ordinary administrative timelock.
-    fn propose_set_vrf_provider(
-        ref self: TContractState, new_vrf_provider: starknet::ContractAddress,
-    );
-
-    /// Executes the pending VRF provider change after its timelock.
-    fn execute_set_vrf_provider(ref self: TContractState);
-
-    /// Proposes a positive commitment-phase duration in seconds.
-    fn propose_set_commit_duration(ref self: TContractState, commit_duration: u64);
-
-    /// Executes the pending commitment-duration change after its timelock.
-    fn execute_set_commit_duration(ref self: TContractState);
-
-    /// Proposes a positive reveal-phase duration in seconds.
-    fn propose_set_reveal_duration(ref self: TContractState, reveal_duration: u64);
-
-    /// Executes the pending reveal-duration change after its timelock.
-    fn execute_set_reveal_duration(ref self: TContractState);
-
-    /// Proposes the non-reveal slash rate in basis points, from zero through
-    /// 10,000 (one hundred percent).
-    fn propose_set_non_reveal_slash_bps(ref self: TContractState, bps: u16);
-
-    /// Executes the pending non-reveal slash-rate change after its timelock.
-    fn execute_set_non_reveal_slash_bps(ref self: TContractState);
+    /// Executes a matured ordinary parameter change recorded by
+    /// `propose_param_change`, converting the stored `u256` and writing the
+    /// parameter's typed storage slot. Unknown keys revert.
+    fn execute_param_change(ref self: TContractState, param_key: felt252);
 
     /// Returns the configured incoherence slash rate in basis points.
     fn get_incoherence_slash_bps(self: @TContractState) -> u16;
-
-    /// Proposes the incoherence slash rate in basis points, from zero through
-    /// 10,000 (one hundred percent).
-    fn propose_set_incoherence_slash_bps(ref self: TContractState, bps: u16);
-
-    /// Executes the pending incoherence slash-rate change after its timelock.
-    fn execute_set_incoherence_slash_bps(ref self: TContractState);
 
     /// Returns the configured coherence band (the maximum absolute score
     /// difference that still counts as coherent).
     fn get_coherence_band(self: @TContractState) -> u8;
 
-    /// Proposes the coherence band, from zero through `MAX_COHERENCE_BAND`.
-    fn propose_set_coherence_band(ref self: TContractState, band: u8);
-
-    /// Executes the pending coherence-band change after its timelock.
-    fn execute_set_coherence_band(ref self: TContractState);
-
-    /// Proposes the ERC20 decay rate in basis points, from zero through 10,000.
-    fn propose_set_decay_rate_bps(ref self: TContractState, bps: u16);
-
-    /// Executes the pending ERC20 decay-rate change after its timelock.
-    fn execute_set_decay_rate_bps(ref self: TContractState);
-
-    /// Proposes the minimum decay amount for a caller reward, capped at
-    /// `MAX_SUPPLY`; zero disables the effective minimum.
-    fn propose_set_min_decay_for_reward(ref self: TContractState, amount: u256);
-
-    /// Executes the pending minimum-decay threshold after its timelock.
-    fn execute_set_min_decay_for_reward(ref self: TContractState);
-
-    /// Proposes the decay caller reward amount, capped at `MAX_SUPPLY`; zero
-    /// disables the reward mint.
-    fn propose_set_caller_reward_amount(ref self: TContractState, amount: u256);
-
-    /// Executes the pending decay caller reward after its timelock.
-    fn execute_set_caller_reward_amount(ref self: TContractState);
-
-    /// Proposes the juror draw count between `MIN_NUM_DRAWS` and
-    /// `MAX_NUM_DRAWS`, using the ordinary administrative timelock.
-    fn propose_set_num_draws(ref self: TContractState, num_draws: u32);
-
-    /// Executes the pending juror draw-count change after its timelock.
-    fn execute_set_num_draws(ref self: TContractState);
-
     /// Returns the current configured juror draw count.
     fn get_num_draws(self: @TContractState) -> u32;
-
-    /// Proposes the per-level conviction base lock in seconds. The value must
-    /// be positive and no greater than `MAX_LOCK_DURATION`.
-    fn propose_set_conviction_base_lock(ref self: TContractState, lock_duration: u64);
-
-    /// Executes the pending conviction base-lock change after its timelock.
-    fn execute_set_conviction_base_lock(ref self: TContractState);
 
     /// Returns the current per-level conviction base lock in seconds.
     fn get_conviction_base_lock(self: @TContractState) -> u64;
 
-    /// Proposes the maximum number of distinct proposals one conviction may
-    /// vote on. The value must be positive and no greater than
-    /// `MAX_MAX_VOTES_PER_CONVICTION`.
-    fn propose_set_max_votes_per_conviction(ref self: TContractState, max_votes: u64);
-
-    /// Executes the pending per-conviction vote-limit change after its timelock.
-    fn execute_set_max_votes_per_conviction(ref self: TContractState);
-
     /// Returns the current distinct-proposal vote limit per conviction.
     fn get_max_votes_per_conviction(self: @TContractState) -> u64;
 
-    /// Proposes the minimum funding-proposal voting period in seconds. The
-    /// value must be positive and no greater than `MAX_PROPOSAL_VOTING_PERIOD`.
-    fn propose_set_proposal_voting_period(ref self: TContractState, duration: u64);
-
-    /// Executes the pending proposal voting-period change after its timelock.
-    fn execute_set_proposal_voting_period(ref self: TContractState);
-
     /// Returns the current minimum funding-proposal voting period in seconds.
     fn get_proposal_voting_period(self: @TContractState) -> u64;
-
-    /// Proposes the cooldown a candidate must wait after a finalized evaluation
-    /// before reapplying, in seconds. The value must be positive and no greater
-    /// than `MAX_EVALUATION_COOLDOWN`.
-    fn propose_set_evaluation_cooldown(ref self: TContractState, duration: u64);
-
-    /// Executes the pending evaluation-cooldown change after its timelock.
-    fn execute_set_evaluation_cooldown(ref self: TContractState);
 
     /// Returns the current evaluation cooldown in seconds.
     fn get_evaluation_cooldown(self: @TContractState) -> u64;
@@ -589,13 +468,6 @@ pub trait IStakeholderConviction<TContractState> {
     fn get_last_evaluation_finalized(
         self: @TContractState, candidate: starknet::ContractAddress,
     ) -> u64;
-
-    /// Proposes the monthly inflation rate in basis points, up to
-    /// `MAX_INFLATION_BPS`.
-    fn propose_set_inflation_rate_bps(ref self: TContractState, bps: u16);
-
-    /// Executes the pending monthly inflation-rate change after its timelock.
-    fn execute_set_inflation_rate_bps(ref self: TContractState);
 
     /// Proposes a timelocked protected-address flag change. Only the default
     /// admin may call it, the target must be non-zero, and the change becomes
@@ -2109,244 +1981,38 @@ let caller = get_caller_address();
               // ADMIN - timelocked parameter changes
         // ----------------------------------------------------------
 
-        fn propose_set_evaluation_bond_amount(ref self: ContractState, amount: u256) {
-            assert(amount > 0, 'ZeroAmount');
-            assert(amount <= MAX_SUPPLY, 'TooHigh');
-            self._propose_change(PARAM_EVALUATION_BOND_AMOUNT, amount);
+        fn propose_param_change(ref self: ContractState, param_key: felt252, new_value: u256) {
+            self._validate_param(param_key, new_value);
+            self._propose_change(param_key, new_value);
         }
 
-        fn execute_set_evaluation_bond_amount(ref self: ContractState) {
-            let value = self._execute_change(PARAM_EVALUATION_BOND_AMOUNT);
-            self.evaluation_bond_amount.write(value);
-        }
-
-        fn propose_set_reputation_stake(ref self: ContractState, amount: u256) {
-            assert(amount > 0, 'ZeroAmount');
-            assert(amount <= MAX_SUPPLY, 'TooHigh');
-            self._propose_change(PARAM_REPUTATION_STAKE, amount);
-        }
-
-        fn execute_set_reputation_stake(ref self: ContractState) {
-            let value = self._execute_change(PARAM_REPUTATION_STAKE);
-            self.reputation_stake.write(value);
-        }
-
-        fn propose_set_conviction_threshold(ref self: ContractState, threshold: u256) {
-            assert(threshold > 0, 'ZeroAmount');
-            assert(threshold <= MAX_SUPPLY, 'TooHigh');
-            self._propose_change(PARAM_CONVICTION_THRESHOLD, threshold);
-        }
-
-        fn execute_set_conviction_threshold(ref self: ContractState) {
-            let value = self._execute_change(PARAM_CONVICTION_THRESHOLD);
-            self.conviction_threshold.write(value);
-        }
-
-        fn propose_set_reward_multiplier(ref self: ContractState, amount: u256) {
-            assert(amount > 0, 'ZeroAmount');
-            assert(amount <= MAX_SUPPLY, 'TooHigh');
-            self._propose_change(PARAM_REWARD_MULTIPLIER, amount);
-        }
-
-        fn execute_set_reward_multiplier(ref self: ContractState) {
-            let value = self._execute_change(PARAM_REWARD_MULTIPLIER);
-            self.reward_multiplier.write(value);
-        }
-
-        fn propose_set_mini_reward_multiplier(ref self: ContractState, amount: u256) {
-            assert(amount > 0, 'ZeroAmount');
-            assert(amount <= MAX_SUPPLY, 'TooHigh');
-            self._propose_change(PARAM_MINI_REWARD_MULTIPLIER, amount);
-        }
-
-        fn execute_set_mini_reward_multiplier(ref self: ContractState) {
-            let value = self._execute_change(PARAM_MINI_REWARD_MULTIPLIER);
-            self.mini_reward_multiplier.write(value);
-        }
-
-        fn propose_set_vrf_provider(
-            ref self: ContractState, new_vrf_provider: ContractAddress,
-        ) {
-            assert(new_vrf_provider.is_non_zero(), 'ZeroAddress');
-            self._propose_change(PARAM_VRF_PROVIDER, self._address_to_u256(new_vrf_provider));
-        }
-
-        fn execute_set_vrf_provider(ref self: ContractState) {
-            let value = self._execute_change(PARAM_VRF_PROVIDER);
-            self.vrf_consumer.set_vrf_provider(self._u256_to_address(value));
-        }
-
-        fn propose_set_commit_duration(ref self: ContractState, commit_duration: u64) {
-            assert(commit_duration > 0, 'InvalidDuration');
-            self._propose_change(PARAM_COMMIT_DURATION, commit_duration.into());
-        }
-
-        fn execute_set_commit_duration(ref self: ContractState) {
-            let value = self._execute_change(PARAM_COMMIT_DURATION);
-            let value_u64: u64 = value.try_into().unwrap();
-            self.commit_duration.write(value_u64);
-        }
-
-        fn propose_set_reveal_duration(ref self: ContractState, reveal_duration: u64) {
-            assert(reveal_duration > 0, 'InvalidDuration');
-            self._propose_change(PARAM_REVEAL_DURATION, reveal_duration.into());
-        }
-
-        fn execute_set_reveal_duration(ref self: ContractState) {
-            let value = self._execute_change(PARAM_REVEAL_DURATION);
-            let value_u64: u64 = value.try_into().unwrap();
-            self.reveal_duration.write(value_u64);
-        }
-
-        fn propose_set_non_reveal_slash_bps(ref self: ContractState, bps: u16) {
-            assert(bps <= 10_000, 'TooHigh');
-            self._propose_change(PARAM_NON_REVEAL_SLASH_BPS, bps.into());
-        }
-
-        fn execute_set_non_reveal_slash_bps(ref self: ContractState) {
-            let value = self._execute_change(PARAM_NON_REVEAL_SLASH_BPS);
-            let value_u64: u64 = value.try_into().unwrap();
-            let value_u16: u16 = value_u64.try_into().unwrap();
-            self.non_reveal_slash_bps.write(value_u16);
+        fn execute_param_change(ref self: ContractState, param_key: felt252) {
+            let value = self._execute_change(param_key);
+            self._apply_param(param_key, value);
         }
 
         fn get_incoherence_slash_bps(self: @ContractState) -> u16 {
             self.incoherence_slash_bps.read()
         }
 
-        fn propose_set_incoherence_slash_bps(ref self: ContractState, bps: u16) {
-            assert(bps <= 10_000, 'TooHigh');
-            self._propose_change(PARAM_INCOHERENCE_SLASH_BPS, bps.into());
-        }
-
-        fn execute_set_incoherence_slash_bps(ref self: ContractState) {
-            let value = self._execute_change(PARAM_INCOHERENCE_SLASH_BPS);
-            let value_u64: u64 = value.try_into().unwrap();
-            let value_u16: u16 = value_u64.try_into().unwrap();
-            self.incoherence_slash_bps.write(value_u16);
-        }
-
         fn get_coherence_band(self: @ContractState) -> u8 {
             self.coherence_band.read()
-        }
-
-        fn propose_set_coherence_band(ref self: ContractState, band: u8) {
-            assert(band <= MAX_COHERENCE_BAND, 'TooHigh');
-            self._propose_change(PARAM_COHERENCE_BAND, band.into());
-        }
-
-        fn execute_set_coherence_band(ref self: ContractState) {
-            let value = self._execute_change(PARAM_COHERENCE_BAND);
-            let value_u8: u8 = value.try_into().unwrap();
-            self.coherence_band.write(value_u8);
-        }
-
-        fn propose_set_decay_rate_bps(ref self: ContractState, bps: u16) {
-            assert(bps <= 10_000, 'TooHigh');
-            self._propose_change(PARAM_DECAY_RATE_BPS, bps.into());
-        }
-
-        fn execute_set_decay_rate_bps(ref self: ContractState) {
-            let value = self._execute_change(PARAM_DECAY_RATE_BPS);
-            let value_u64: u64 = value.try_into().unwrap();
-            let value_u16: u16 = value_u64.try_into().unwrap();
-            self.decay_rate_bps.write(value_u16);
-        }
-
-        fn propose_set_min_decay_for_reward(ref self: ContractState, amount: u256) {
-            assert(amount <= MAX_SUPPLY, 'TooHigh');
-            self._propose_change(PARAM_MIN_DECAY_FOR_REWARD, amount);
-        }
-
-        fn execute_set_min_decay_for_reward(ref self: ContractState) {
-            let value = self._execute_change(PARAM_MIN_DECAY_FOR_REWARD);
-            self.min_decay_for_reward.write(value);
-        }
-
-        fn propose_set_caller_reward_amount(ref self: ContractState, amount: u256) {
-            assert(amount <= MAX_SUPPLY, 'TooHigh');
-            self._propose_change(PARAM_CALLER_REWARD_AMOUNT, amount);
-        }
-
-        fn execute_set_caller_reward_amount(ref self: ContractState) {
-            let value = self._execute_change(PARAM_CALLER_REWARD_AMOUNT);
-            self.caller_reward_amount.write(value);
-        }
-
-        fn propose_set_num_draws(ref self: ContractState, num_draws: u32) {
-            assert(num_draws >= MIN_NUM_DRAWS, 'BelowMinNumDraws');
-            assert(num_draws <= MAX_NUM_DRAWS, 'AboveMaxNumDraws');
-            self._propose_change(PARAM_NUM_DRAWS, num_draws.into());
-        }
-
-        fn execute_set_num_draws(ref self: ContractState) {
-            let value = self._execute_change(PARAM_NUM_DRAWS);
-            let value_u32: u32 = value.try_into().unwrap();
-            self.num_draws.write(value_u32);
         }
 
         fn get_num_draws(self: @ContractState) -> u32 {
             self.num_draws.read()
         }
 
-        fn propose_set_conviction_base_lock(ref self: ContractState, lock_duration: u64) {
-            assert(lock_duration > 0, 'InvalidDuration');
-            assert(lock_duration <= MAX_LOCK_DURATION, 'TooHigh');
-            self._propose_change(PARAM_CONVICTION_BASE_LOCK, lock_duration.into());
-        }
-
-        fn execute_set_conviction_base_lock(ref self: ContractState) {
-            let value = self._execute_change(PARAM_CONVICTION_BASE_LOCK);
-            let value_u64: u64 = value.try_into().unwrap();
-            self.conviction_base_lock.write(value_u64);
-        }
-
         fn get_conviction_base_lock(self: @ContractState) -> u64 {
             self.conviction_base_lock.read()
-        }
-
-        fn propose_set_max_votes_per_conviction(ref self: ContractState, max_votes: u64) {
-            assert(max_votes > 0, 'InvalidVotesCount');
-            assert(max_votes <= MAX_MAX_VOTES_PER_CONVICTION, 'TooHigh');
-            self._propose_change(PARAM_MAX_VOTES_PER_CONVICTION, max_votes.into());
-        }
-
-        fn execute_set_max_votes_per_conviction(ref self: ContractState) {
-            let value = self._execute_change(PARAM_MAX_VOTES_PER_CONVICTION);
-            let value_u64: u64 = value.try_into().unwrap();
-            self.max_votes_per_conviction.write(value_u64);
         }
 
         fn get_max_votes_per_conviction(self: @ContractState) -> u64 {
             self.max_votes_per_conviction.read()
         }
 
-        fn propose_set_proposal_voting_period(ref self: ContractState, duration: u64) {
-            assert(duration > 0, 'InvalidDuration');
-            assert(duration <= MAX_PROPOSAL_VOTING_PERIOD, 'TooHigh');
-            self._propose_change(PARAM_PROPOSAL_VOTING_PERIOD, duration.into());
-        }
-
-        fn execute_set_proposal_voting_period(ref self: ContractState) {
-            let value = self._execute_change(PARAM_PROPOSAL_VOTING_PERIOD);
-            let value_u64: u64 = value.try_into().unwrap();
-            self.proposal_voting_period.write(value_u64);
-        }
-
         fn get_proposal_voting_period(self: @ContractState) -> u64 {
             self.proposal_voting_period.read()
-        }
-
-        fn propose_set_evaluation_cooldown(ref self: ContractState, duration: u64) {
-            assert(duration > 0, 'InvalidDuration');
-            assert(duration <= MAX_EVALUATION_COOLDOWN, 'TooHigh');
-            self._propose_change(PARAM_EVALUATION_COOLDOWN, duration.into());
-        }
-
-        fn execute_set_evaluation_cooldown(ref self: ContractState) {
-            let value = self._execute_change(PARAM_EVALUATION_COOLDOWN);
-            let value_u64: u64 = value.try_into().unwrap();
-            self.evaluation_cooldown.write(value_u64);
         }
 
         fn get_evaluation_cooldown(self: @ContractState) -> u64 {
@@ -2357,18 +2023,6 @@ let caller = get_caller_address();
             self: @ContractState, candidate: ContractAddress,
         ) -> u64 {
             self.last_evaluation_finalized.entry(candidate).read()
-        }
-
-        fn propose_set_inflation_rate_bps(ref self: ContractState, bps: u16) {
-            assert(bps <= MAX_INFLATION_BPS, 'TooHigh');
-            self._propose_change(PARAM_INFLATION_RATE_BPS, bps.into());
-        }
-
-        fn execute_set_inflation_rate_bps(ref self: ContractState) {
-            let value = self._execute_change(PARAM_INFLATION_RATE_BPS);
-            let value_u64: u64 = value.try_into().unwrap();
-            let value_u16: u16 = value_u64.try_into().unwrap();
-            self.inflation_rate_bps.write(value_u16);
         }
 
         fn propose_set_protected_address(
@@ -3120,6 +2774,105 @@ let caller = get_caller_address();
         }
 
         // ---- generic timelock engine ----
+
+        /// Validates a generic parameter change against the per-key bounds that
+        /// were previously enforced by each named `propose_set_*` wrapper. The
+        /// value is a `u256`; addresses are felt-encoded.
+        fn _validate_param(self: @ContractState, param_key: felt252, new_value: u256) {
+            if param_key == PARAM_EVALUATION_BOND_AMOUNT
+                || param_key == PARAM_REPUTATION_STAKE
+                || param_key == PARAM_CONVICTION_THRESHOLD
+                || param_key == PARAM_REWARD_MULTIPLIER
+                || param_key == PARAM_MINI_REWARD_MULTIPLIER {
+                assert(new_value > 0, 'ZeroAmount');
+                assert(new_value <= MAX_SUPPLY, 'TooHigh');
+            } else if param_key == PARAM_VRF_PROVIDER {
+                assert(new_value != 0, 'ZeroAddress');
+            } else if param_key == PARAM_COMMIT_DURATION
+                || param_key == PARAM_REVEAL_DURATION {
+                assert(new_value > 0, 'InvalidDuration');
+            } else if param_key == PARAM_NON_REVEAL_SLASH_BPS
+                || param_key == PARAM_INCOHERENCE_SLASH_BPS
+                || param_key == PARAM_DECAY_RATE_BPS {
+                assert(new_value <= 10_000, 'TooHigh');
+            } else if param_key == PARAM_COHERENCE_BAND {
+                assert(new_value <= MAX_COHERENCE_BAND.into(), 'TooHigh');
+            } else if param_key == PARAM_MIN_DECAY_FOR_REWARD
+                || param_key == PARAM_CALLER_REWARD_AMOUNT {
+                assert(new_value <= MAX_SUPPLY, 'TooHigh');
+            } else if param_key == PARAM_NUM_DRAWS {
+                assert(new_value >= MIN_NUM_DRAWS.into(), 'BelowMinNumDraws');
+                assert(new_value <= MAX_NUM_DRAWS.into(), 'AboveMaxNumDraws');
+            } else if param_key == PARAM_CONVICTION_BASE_LOCK {
+                assert(new_value > 0, 'InvalidDuration');
+                assert(new_value <= MAX_LOCK_DURATION.into(), 'TooHigh');
+            } else if param_key == PARAM_MAX_VOTES_PER_CONVICTION {
+                assert(new_value > 0, 'InvalidVotesCount');
+                assert(new_value <= MAX_MAX_VOTES_PER_CONVICTION.into(), 'TooHigh');
+            } else if param_key == PARAM_PROPOSAL_VOTING_PERIOD {
+                assert(new_value > 0, 'InvalidDuration');
+                assert(new_value <= MAX_PROPOSAL_VOTING_PERIOD.into(), 'TooHigh');
+            } else if param_key == PARAM_EVALUATION_COOLDOWN {
+                assert(new_value > 0, 'InvalidDuration');
+                assert(new_value <= MAX_EVALUATION_COOLDOWN.into(), 'TooHigh');
+            } else if param_key == PARAM_INFLATION_RATE_BPS {
+                assert(new_value <= MAX_INFLATION_BPS.into(), 'TooHigh');
+            } else {
+                assert(false, 'UnknownParam');
+            }
+        }
+
+        /// Writes a matured generic parameter value into its typed storage slot.
+        /// Every key validated by `_validate_param` is handled here.
+        fn _apply_param(ref self: ContractState, param_key: felt252, new_value: u256) {
+            if param_key == PARAM_EVALUATION_BOND_AMOUNT {
+                self.evaluation_bond_amount.write(new_value);
+            } else if param_key == PARAM_REPUTATION_STAKE {
+                self.reputation_stake.write(new_value);
+            } else if param_key == PARAM_CONVICTION_THRESHOLD {
+                self.conviction_threshold.write(new_value);
+            } else if param_key == PARAM_REWARD_MULTIPLIER {
+                self.reward_multiplier.write(new_value);
+            } else if param_key == PARAM_MINI_REWARD_MULTIPLIER {
+                self.mini_reward_multiplier.write(new_value);
+            } else if param_key == PARAM_VRF_PROVIDER {
+                self.vrf_consumer.set_vrf_provider(self._u256_to_address(new_value));
+            } else if param_key == PARAM_COMMIT_DURATION {
+                self.commit_duration.write(new_value.try_into().unwrap());
+            } else if param_key == PARAM_REVEAL_DURATION {
+                self.reveal_duration.write(new_value.try_into().unwrap());
+            } else if param_key == PARAM_NON_REVEAL_SLASH_BPS {
+                let value_u64: u64 = new_value.try_into().unwrap();
+                self.non_reveal_slash_bps.write(value_u64.try_into().unwrap());
+            } else if param_key == PARAM_INCOHERENCE_SLASH_BPS {
+                let value_u64: u64 = new_value.try_into().unwrap();
+                self.incoherence_slash_bps.write(value_u64.try_into().unwrap());
+            } else if param_key == PARAM_COHERENCE_BAND {
+                self.coherence_band.write(new_value.try_into().unwrap());
+            } else if param_key == PARAM_DECAY_RATE_BPS {
+                let value_u64: u64 = new_value.try_into().unwrap();
+                self.decay_rate_bps.write(value_u64.try_into().unwrap());
+            } else if param_key == PARAM_MIN_DECAY_FOR_REWARD {
+                self.min_decay_for_reward.write(new_value);
+            } else if param_key == PARAM_CALLER_REWARD_AMOUNT {
+                self.caller_reward_amount.write(new_value);
+            } else if param_key == PARAM_NUM_DRAWS {
+                self.num_draws.write(new_value.try_into().unwrap());
+            } else if param_key == PARAM_CONVICTION_BASE_LOCK {
+                self.conviction_base_lock.write(new_value.try_into().unwrap());
+            } else if param_key == PARAM_MAX_VOTES_PER_CONVICTION {
+                self.max_votes_per_conviction.write(new_value.try_into().unwrap());
+            } else if param_key == PARAM_PROPOSAL_VOTING_PERIOD {
+                self.proposal_voting_period.write(new_value.try_into().unwrap());
+            } else if param_key == PARAM_EVALUATION_COOLDOWN {
+                self.evaluation_cooldown.write(new_value.try_into().unwrap());
+            } else if param_key == PARAM_INFLATION_RATE_BPS {
+                let value_u64: u64 = new_value.try_into().unwrap();
+                self.inflation_rate_bps.write(value_u64.try_into().unwrap());
+            } else {
+                assert(false, 'UnknownParam');
+            }
+        }
 
         /// Records an admin-authorized ordinary parameter change with a
         /// three-day execution time and emits `ChangeProposed`.
