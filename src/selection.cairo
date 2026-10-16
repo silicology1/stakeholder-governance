@@ -217,6 +217,7 @@ pub mod Selection {
                 owner: caller,
                 amount,
                 created_at: get_block_timestamp(),
+                retired: false,
             };
             self.stakes.entry(stake_id).write(stake);
 
@@ -243,10 +244,12 @@ pub mod Selection {
             assert(active_evals == 0, 'StakeLocked');
 
             let new_amount = stake.amount - amount;
+            let fully_unstaked = new_amount == 0;
             self.stakes.entry(stake_id).write(Stake {
                 owner: stake.owner,
                 amount: new_amount,
                 created_at: stake.created_at,
+                retired: fully_unstaked || stake.retired,
             });
 
             self._token().release(caller, amount);
@@ -326,6 +329,7 @@ pub mod Selection {
 
             let stake = self.stakes.entry(stake_id).read();
             assert(stake.owner == caller, 'NotStakeOwner');
+            assert(!stake.retired, 'StakeRetired');
 
             let current_evals = self.stake_evaluation_count.entry(stake_id).read();
             let max_evals = self.max_evaluations_per_stake.read();
@@ -1554,6 +1558,7 @@ pub mod Selection {
                 owner: stake.owner,
                 amount: new_amount,
                 created_at: stake.created_at,
+                retired: new_amount == 0 || stake.retired,
             });
         }
 

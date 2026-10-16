@@ -57,6 +57,8 @@ pub struct Stake {
     pub amount: u256,
     /// Block timestamp at stake creation.
     pub created_at: u64,
+    /// Whether the stake has been fully withdrawn and retired.
+    pub retired: bool,
 }
 
 /// Durable state for one candidate evaluation. Each evaluation has its own
