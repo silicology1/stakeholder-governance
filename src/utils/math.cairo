@@ -19,7 +19,7 @@ pub fn isqrt(x: u256) -> u256 {
             break;
         }
         bit = bit * 4;
-    };
+    }
 
     let mut result: u256 = 0;
     let mut rem: u256 = x;
@@ -34,7 +34,7 @@ pub fn isqrt(x: u256) -> u256 {
             result = result / 2;
         }
         bit = bit / 4;
-    };
+    }
     result
 }
 

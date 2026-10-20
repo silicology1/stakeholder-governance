@@ -9,25 +9,24 @@
 //!   AdminTimelock: propose_set_* / execute_set_* (per-parameter entry points)
 
 use core::poseidon::poseidon_hash_span;
-use starknet::ContractAddress;
-
+use openzeppelin_interfaces::erc20::{IERC20Dispatcher, IERC20DispatcherTrait};
 use snforge_std::{
     CheatSpan, ContractClassTrait, DeclareResultTrait, cheat_caller_address, declare,
-    start_cheat_block_timestamp_global, start_mock_call, start_cheat_caller_address,
-};
-use openzeppelin_interfaces::erc20::{IERC20Dispatcher, IERC20DispatcherTrait};
-use stakeholder_governance_modular::interfaces::iselection::{
-    ISelectionDispatcher, ISelectionDispatcherTrait,
-};
-use stakeholder_governance_modular::interfaces::igovernance::{
-    IGovernanceDispatcher, IGovernanceDispatcherTrait,
-};
-use stakeholder_governance_modular::interfaces::iconviction_token::{
-    IConvictionTokenDispatcher, IConvictionTokenDispatcherTrait,
+    start_cheat_block_timestamp_global, start_cheat_caller_address, start_mock_call,
 };
 use stakeholder_governance_modular::interfaces::iadmin_timelock::{
     IAdminTimelockDispatcher, IAdminTimelockDispatcherTrait,
 };
+use stakeholder_governance_modular::interfaces::iconviction_token::{
+    IConvictionTokenDispatcher, IConvictionTokenDispatcherTrait,
+};
+use stakeholder_governance_modular::interfaces::igovernance::{
+    IGovernanceDispatcher, IGovernanceDispatcherTrait,
+};
+use stakeholder_governance_modular::interfaces::iselection::{
+    ISelectionDispatcher, ISelectionDispatcherTrait,
+};
+use starknet::ContractAddress;
 
 // ////////////////////////////////////////////////////////////////
 //                         SHARED TEST CONSTANTS
@@ -107,9 +106,7 @@ fn cheat1(target: ContractAddress, caller: ContractAddress) {
     cheat_caller_address(target, caller, CheatSpan::TargetCalls(1));
 }
 
-fn deploy(
-    threshold: u256, reward_multiplier: u256, mini_reward_multiplier: u256,
-) -> Fixture {
+fn deploy(threshold: u256, reward_multiplier: u256, mini_reward_multiplier: u256) -> Fixture {
     // ConvictionToken
     let token_class = declare("ConvictionToken").unwrap().contract_class();
     let mut calldata: Array<felt252> = array![];
@@ -212,7 +209,9 @@ fn commit_and_reveal(fx: Fixture, dispute_id: u256, score: i8) {
 
 fn finalize(fx: Fixture, dispute_id: u256) {
     const APPLY_DURATION: u64 = 259_200;
-    start_cheat_block_timestamp_global(T0 + APPLY_DURATION + 1 + COMMIT_DURATION + REVEAL_DURATION + 1);
+    start_cheat_block_timestamp_global(
+        T0 + APPLY_DURATION + 1 + COMMIT_DURATION + REVEAL_DURATION + 1,
+    );
     sel_disp(fx).finalize_evaluation(dispute_id);
 }
 
@@ -235,7 +234,7 @@ fn evaluate(fx: Fixture, score: i8) -> u256 {
         let sid = sel_disp(fx).create_stake(STAKE);
         stake_ids.append(sid);
         i += 1;
-    };
+    }
 
     let dispute_id = request_evaluation(fx);
 
@@ -248,7 +247,7 @@ fn evaluate(fx: Fixture, score: i8) -> u256 {
         }
         sel_disp(fx).apply_to_evaluation(dispute_id, *stake_ids.at(j));
         j += 1;
-    };
+    }
 
     // Advance past apply deadline -> DRAWING
     const APPLY_DURATION: u64 = 259_200;
@@ -375,7 +374,7 @@ fn test_dismissal_gas_many_applied_stakes() {
         start_cheat_caller_address(fx.selection, address);
         sel.create_stake(STAKE);
         index += 1;
-    };
+    }
 
     fund(fx, candidate(), FUND);
     cheat1(fx.token, candidate());
@@ -391,7 +390,7 @@ fn test_dismissal_gas_many_applied_stakes() {
         start_cheat_caller_address(fx.selection, juror_address(i));
         sel.apply_to_evaluation(evaluation_id, i.into());
         i += 1;
-    };
+    }
 
     const APPLY_DURATION: u64 = 259_200;
     start_cheat_block_timestamp_global(T0 + APPLY_DURATION + 1);
@@ -432,7 +431,7 @@ fn test_zero_reveal_refunds_bond() {
         let sid = sel_disp(fx).create_stake(STAKE);
         stake_ids.append(sid);
         i += 1;
-    };
+    }
 
     cheat1(fx.token, candidate());
     tok.approve(candidate(), BOND);
@@ -447,7 +446,7 @@ fn test_zero_reveal_refunds_bond() {
         }
         sel_disp(fx).apply_to_evaluation(dispute_id, *stake_ids.at(j));
         j += 1;
-    };
+    }
 
     const APPLY_DURATION: u64 = 259_200;
     start_cheat_block_timestamp_global(T0 + APPLY_DURATION + 1);

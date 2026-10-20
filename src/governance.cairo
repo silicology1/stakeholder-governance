@@ -18,30 +18,26 @@
 #[starknet::contract]
 pub mod Governance {
     use core::num::traits::Zero;
-    use starknet::{
-        ContractAddress, ClassHash, get_caller_address, get_block_timestamp,
-    };
-    use starknet::storage::{
-        Map, StoragePathEntry, StoragePointerReadAccess, StoragePointerWriteAccess,
-    };
-
     use openzeppelin_introspection::src5::SRC5Component;
     use openzeppelin_security::reentrancyguard::ReentrancyGuardComponent;
     use openzeppelin_upgrades::upgradeable::UpgradeableComponent;
-
+    use starknet::storage::{
+        Map, StoragePathEntry, StoragePointerReadAccess, StoragePointerWriteAccess,
+    };
+    use starknet::{ClassHash, ContractAddress, get_block_timestamp, get_caller_address};
     use crate::constants::*;
     use crate::events::*;
-    use crate::types::*;
-    use crate::utils::{isqrt, score_to_u256};
-    use crate::interfaces::igovernance::IGovernance;
-    use crate::interfaces::iupgradeable_module::IUpgradeableModule;
     use crate::interfaces::iconviction_token::{
         IConvictionTokenDispatcher, IConvictionTokenDispatcherTrait,
     };
+    use crate::interfaces::igovernance::IGovernance;
+    use crate::interfaces::iupgradeable_module::IUpgradeableModule;
+    use crate::types::*;
+    use crate::utils::{isqrt, score_to_u256};
 
     component!(path: SRC5Component, storage: src5, event: SRC5Event);
     component!(
-        path: ReentrancyGuardComponent, storage: reentrancyguard, event: ReentrancyGuardEvent
+        path: ReentrancyGuardComponent, storage: reentrancyguard, event: ReentrancyGuardEvent,
     );
     component!(path: UpgradeableComponent, storage: upgradeable, event: UpgradeableEvent);
 
@@ -62,7 +58,6 @@ pub mod Governance {
         /// Upgradeable implementation state.
         #[substorage(v0)]
         upgradeable: UpgradeableComponent::Storage,
-
         /// Module admin authority (the `AdminTimelock` contract).
         admin: ContractAddress,
         /// ERC20 custody hub address.
@@ -71,7 +66,6 @@ pub mod Governance {
         selection: ContractAddress,
         /// Whether the class-hash upgrade path is permanently disabled.
         upgrades_disabled: bool,
-
         // ---- timelocked admin parameters ----
         /// ERC20 reputation deposit required to create a proposal.
         reputation_stake: u256,
@@ -87,17 +81,14 @@ pub mod Governance {
         max_votes_per_conviction: u64,
         /// Minimum seconds a proposal stays open for voting before execution.
         proposal_voting_period: u64,
-
         // ---- non-transferable governance tokens ----
         governance_next_grant: Map<ContractAddress, u32>,
         governance_grant: Map<(ContractAddress, u32), Grant>,
         governance_locked_total: Map<ContractAddress, u256>,
-
         // ---- convictions ----
         next_conviction_id: Map<ContractAddress, u32>,
         convictions: Map<(ContractAddress, u32), Conviction>,
         conviction_voted_on: Map<(ContractAddress, u32, u256), bool>,
-
         // ---- proposals ----
         proposal_count: u256,
         proposals: Map<u256, FundingProposal>,
@@ -113,7 +104,6 @@ pub mod Governance {
         ReentrancyGuardEvent: ReentrancyGuardComponent::Event,
         #[flat]
         UpgradeableEvent: UpgradeableComponent::Event,
-
         AdminChanged: AdminChanged,
         SelectionSet: SelectionSet,
         GovernanceTokensMinted: GovernanceTokensMinted,
@@ -257,7 +247,10 @@ pub mod Governance {
             let mut c = self.convictions.entry((caller, conviction_id)).read();
             assert(c.owner == caller, 'Unauthorized');
             assert(!c.released, 'ConvictionReleased');
-            let already = self.conviction_voted_on.entry((caller, conviction_id, proposal_id)).read();
+            let already = self
+                .conviction_voted_on
+                .entry((caller, conviction_id, proposal_id))
+                .read();
             assert(!already, 'AlreadyVotedOnProposal');
             let lock_expiry = c.created_at + c.lock_duration;
             assert(get_block_timestamp() < lock_expiry, 'LockExpired');
@@ -413,9 +406,7 @@ pub mod Governance {
 
         // ---- selection-gated ----
 
-        fn mint_governance_tokens(
-            ref self: ContractState, holder: ContractAddress, amount: u256,
-        ) {
+        fn mint_governance_tokens(ref self: ContractState, holder: ContractAddress, amount: u256) {
             assert(get_caller_address() == self.selection.read(), 'NotSelection');
             if amount > 0 {
                 self._mint_governance_tokens(holder, amount);
@@ -565,9 +556,7 @@ pub mod Governance {
         /// Adds a non-transferable governance grant using the first reusable
         /// fully decayed slot, then an unused slot, or finally the most-decayed
         /// slot when the per-holder cap is reached.
-        fn _mint_governance_tokens(
-            ref self: ContractState, holder: ContractAddress, amount: u256,
-        ) {
+        fn _mint_governance_tokens(ref self: ContractState, holder: ContractAddress, amount: u256) {
             let count = self.governance_next_grant.entry(holder).read();
             let slot = self._next_free_grant_slot(holder);
             if slot < count {
@@ -598,7 +587,7 @@ pub mod Governance {
                     return i;
                 }
                 i += 1;
-            };
+            }
             count
         }
 
@@ -621,7 +610,7 @@ pub mod Governance {
                     target = i;
                 }
                 i += 1;
-            };
+            }
             self
                 .governance_grant
                 .entry((holder, target))
@@ -653,7 +642,7 @@ pub mod Governance {
                 let g = self.governance_grant.entry((holder, i)).read();
                 total += self._decayed_grant_amount(@g);
                 i += 1;
-            };
+            }
             total
         }
 
@@ -680,7 +669,7 @@ pub mod Governance {
                 }
                 total += cnt;
                 i += 1;
-            };
+            }
 
             let (is_neg, magnitude): (bool, u256) = if total == 0 {
                 (false, 0)

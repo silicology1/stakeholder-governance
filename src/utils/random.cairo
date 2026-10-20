@@ -10,9 +10,7 @@ use core::poseidon::poseidon_hash_span;
 /// identifier, and a draw index. The three inputs are hashed with Poseidon so
 /// a distinct draw index cannot reuse the same base randomness directly.
 /// `dispute_id` must fit the felt252 conversion used by the contract.
-pub fn derive_draw_random(
-    base_seed: felt252, dispute_id: u256, draw_index: u32,
-) -> felt252 {
+pub fn derive_draw_random(base_seed: felt252, dispute_id: u256, draw_index: u32) -> felt252 {
     let mut input: Array<felt252> = ArrayTrait::new();
     input.append(base_seed);
     let dispute_id_felt: felt252 = dispute_id.try_into().unwrap();

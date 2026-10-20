@@ -3,8 +3,8 @@
 //! owns parameter proposals, protected-address changes, the admin roster,
 //! and class-hash upgrade / disable orchestration for the other modules.
 
-use starknet::{ContractAddress, ClassHash};
-use crate::types::{PendingChange, PendingProtectedChange, PendingUpgrade, PendingAdminChange};
+use starknet::{ClassHash, ContractAddress};
+use crate::types::{PendingAdminChange, PendingChange, PendingProtectedChange, PendingUpgrade};
 
 #[starknet::interface]
 pub trait IAdminTimelock<TContractState> {
@@ -98,9 +98,7 @@ pub trait IAdminTimelock<TContractState> {
     fn propose_set_protected_address(
         ref self: TContractState, target: ContractAddress, protected: bool,
     );
-    fn execute_set_protected_address(
-        ref self: TContractState, target_address: ContractAddress,
-    );
+    fn execute_set_protected_address(ref self: TContractState, target_address: ContractAddress);
     fn get_pending_protected(
         self: @TContractState, target_address: ContractAddress,
     ) -> PendingProtectedChange;
@@ -126,7 +124,5 @@ pub trait IAdminTimelock<TContractState> {
     fn execute_disable_upgrades(ref self: TContractState, target: ContractAddress);
     fn is_upgrades_disabled(self: @TContractState, target: ContractAddress) -> bool;
     fn get_pending_upgrade(self: @TContractState, target: ContractAddress) -> PendingUpgrade;
-    fn get_pending_upgrade_disable(
-        self: @TContractState, target: ContractAddress,
-    ) -> PendingChange;
+    fn get_pending_upgrade_disable(self: @TContractState, target: ContractAddress) -> PendingChange;
 }

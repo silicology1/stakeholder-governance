@@ -22,13 +22,13 @@
 //!   - `utils/`    : pure helpers (math, fenwick, random)
 //!   - `interfaces`: cross-contract dispatcher traits
 
+pub mod admin_timelock;
 pub mod constants;
-pub mod types;
-pub mod utils;
-pub mod events;
-pub mod interfaces;
 
 pub mod conviction_token;
-pub mod selection;
+pub mod events;
 pub mod governance;
-pub mod admin_timelock;
+pub mod interfaces;
+pub mod selection;
+pub mod types;
+pub mod utils;

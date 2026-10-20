@@ -37,9 +37,7 @@ pub trait IGovernance<TContractState> {
 
     /// Mints a decaying non-transferable governance-token grant. Only the
     /// registered `Selection` module may call this.
-    fn mint_governance_tokens(
-        ref self: TContractState, holder: ContractAddress, amount: u256,
-    );
+    fn mint_governance_tokens(ref self: TContractState, holder: ContractAddress, amount: u256);
 
     // ---- admin ----
 

@@ -17,40 +17,33 @@
 
 #[starknet::contract]
 pub mod AdminTimelock {
-    use starknet::{
-        ContractAddress, ClassHash, get_caller_address, get_block_timestamp,
-        get_contract_address,
-    };
-    use starknet::storage::{
-        Map, StoragePathEntry, StoragePointerReadAccess, StoragePointerWriteAccess,
-    };
     use core::num::traits::Zero;
-
     use openzeppelin_access::accesscontrol::{AccessControlComponent, DEFAULT_ADMIN_ROLE};
     use openzeppelin_introspection::src5::SRC5Component;
     use openzeppelin_security::reentrancyguard::ReentrancyGuardComponent;
     use openzeppelin_upgrades::upgradeable::UpgradeableComponent;
-
-    use crate::constants::*;
-    use crate::types::*;
-    use crate::interfaces::iadmin_timelock::IAdminTimelock;
-    use crate::interfaces::iupgradeable_module::{
-        IUpgradeableModuleDispatcher, IUpgradeableModuleDispatcherTrait,
+    use starknet::storage::{
+        Map, StoragePathEntry, StoragePointerReadAccess, StoragePointerWriteAccess,
     };
+    use starknet::{
+        ClassHash, ContractAddress, get_block_timestamp, get_caller_address, get_contract_address,
+    };
+    use crate::constants::*;
+    use crate::interfaces::iadmin_timelock::IAdminTimelock;
     use crate::interfaces::iconviction_token::{
         IConvictionTokenDispatcher, IConvictionTokenDispatcherTrait,
     };
-    use crate::interfaces::igovernance::{
-        IGovernanceDispatcher, IGovernanceDispatcherTrait,
+    use crate::interfaces::igovernance::{IGovernanceDispatcher, IGovernanceDispatcherTrait};
+    use crate::interfaces::iselection::{ISelectionDispatcher, ISelectionDispatcherTrait};
+    use crate::interfaces::iupgradeable_module::{
+        IUpgradeableModuleDispatcher, IUpgradeableModuleDispatcherTrait,
     };
-    use crate::interfaces::iselection::{
-        ISelectionDispatcher, ISelectionDispatcherTrait,
-    };
+    use crate::types::*;
 
     component!(path: AccessControlComponent, storage: accesscontrol, event: AccessControlEvent);
     component!(path: SRC5Component, storage: src5, event: SRC5Event);
     component!(
-        path: ReentrancyGuardComponent, storage: reentrancyguard, event: ReentrancyGuardEvent
+        path: ReentrancyGuardComponent, storage: reentrancyguard, event: ReentrancyGuardEvent,
     );
     component!(path: UpgradeableComponent, storage: upgradeable, event: UpgradeableEvent);
 
@@ -74,19 +67,16 @@ pub mod AdminTimelock {
         reentrancyguard: ReentrancyGuardComponent::Storage,
         #[substorage(v0)]
         upgradeable: UpgradeableComponent::Storage,
-
         /// ERC20 custody hub / token module address.
         token: ContractAddress,
         /// Selection module address.
         selection: ContractAddress,
         /// Governance module address.
         governance: ContractAddress,
-
         /// Current number of default admins.
         admin_count: u32,
         /// Whether AdminTimelock's own upgrade path is disabled forever.
         self_upgrades_disabled: bool,
-
         /// Pending ordinary parameter changes keyed by (target, param key).
         pending_changes: Map<(ContractAddress, felt252), PendingChange>,
         /// Pending protected-address changes keyed by target address.
@@ -203,7 +193,6 @@ pub mod AdminTimelock {
         ReentrancyGuardEvent: ReentrancyGuardComponent::Event,
         #[flat]
         UpgradeableEvent: UpgradeableComponent::Event,
-
         ChangeProposed: ChangeProposed,
         ChangeExecuted: ChangeExecuted,
         ProtectedAddressProposed: ProtectedAddressProposed,
@@ -257,22 +246,22 @@ pub mod AdminTimelock {
                 .pending_changes
                 .entry((self.selection.read(), PARAM_EVALUATION_BOND_AMOUNT))
                 .write(PendingChange { new_value: amount, effective_at, exists: true });
-            self.emit(ChangeProposed {
-                target: self.selection.read(),
-                param_key: PARAM_EVALUATION_BOND_AMOUNT,
-                new_value: amount,
-                effective_at,
-            });
+            self
+                .emit(
+                    ChangeProposed {
+                        target: self.selection.read(),
+                        param_key: PARAM_EVALUATION_BOND_AMOUNT,
+                        new_value: amount,
+                        effective_at,
+                    },
+                );
         }
 
         fn execute_set_evaluation_bond_amount(ref self: ContractState) {
             self.reentrancyguard.start();
             self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
             let target = self.selection.read();
-            let pc = self
-                .pending_changes
-                .entry((target, PARAM_EVALUATION_BOND_AMOUNT))
-                .read();
+            let pc = self.pending_changes.entry((target, PARAM_EVALUATION_BOND_AMOUNT)).read();
             assert(pc.exists, 'NoPendingChange');
             assert(get_block_timestamp() >= pc.effective_at, 'TimelockNotElapsed');
             self
@@ -281,11 +270,12 @@ pub mod AdminTimelock {
                 .write(PendingChange { new_value: 0, effective_at: 0, exists: false });
             ISelectionDispatcher { contract_address: target }
                 .execute_set_evaluation_bond_amount(pc.new_value);
-            self.emit(ChangeExecuted {
-                target,
-                param_key: PARAM_EVALUATION_BOND_AMOUNT,
-                new_value: pc.new_value,
-            });
+            self
+                .emit(
+                    ChangeExecuted {
+                        target, param_key: PARAM_EVALUATION_BOND_AMOUNT, new_value: pc.new_value,
+                    },
+                );
             self.reentrancyguard.end();
         }
 
@@ -297,22 +287,22 @@ pub mod AdminTimelock {
                 .pending_changes
                 .entry((self.selection.read(), PARAM_COMMIT_DURATION))
                 .write(PendingChange { new_value: duration.into(), effective_at, exists: true });
-            self.emit(ChangeProposed {
-                target: self.selection.read(),
-                param_key: PARAM_COMMIT_DURATION,
-                new_value: duration.into(),
-                effective_at,
-            });
+            self
+                .emit(
+                    ChangeProposed {
+                        target: self.selection.read(),
+                        param_key: PARAM_COMMIT_DURATION,
+                        new_value: duration.into(),
+                        effective_at,
+                    },
+                );
         }
 
         fn execute_set_commit_duration(ref self: ContractState) {
             self.reentrancyguard.start();
             self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
             let target = self.selection.read();
-            let pc = self
-                .pending_changes
-                .entry((target, PARAM_COMMIT_DURATION))
-                .read();
+            let pc = self.pending_changes.entry((target, PARAM_COMMIT_DURATION)).read();
             assert(pc.exists, 'NoPendingChange');
             assert(get_block_timestamp() >= pc.effective_at, 'TimelockNotElapsed');
             self
@@ -321,11 +311,12 @@ pub mod AdminTimelock {
                 .write(PendingChange { new_value: 0, effective_at: 0, exists: false });
             ISelectionDispatcher { contract_address: target }
                 .execute_set_commit_duration(pc.new_value.try_into().unwrap());
-            self.emit(ChangeExecuted {
-                target,
-                param_key: PARAM_COMMIT_DURATION,
-                new_value: pc.new_value,
-            });
+            self
+                .emit(
+                    ChangeExecuted {
+                        target, param_key: PARAM_COMMIT_DURATION, new_value: pc.new_value,
+                    },
+                );
             self.reentrancyguard.end();
         }
 
@@ -337,22 +328,22 @@ pub mod AdminTimelock {
                 .pending_changes
                 .entry((self.selection.read(), PARAM_REVEAL_DURATION))
                 .write(PendingChange { new_value: duration.into(), effective_at, exists: true });
-            self.emit(ChangeProposed {
-                target: self.selection.read(),
-                param_key: PARAM_REVEAL_DURATION,
-                new_value: duration.into(),
-                effective_at,
-            });
+            self
+                .emit(
+                    ChangeProposed {
+                        target: self.selection.read(),
+                        param_key: PARAM_REVEAL_DURATION,
+                        new_value: duration.into(),
+                        effective_at,
+                    },
+                );
         }
 
         fn execute_set_reveal_duration(ref self: ContractState) {
             self.reentrancyguard.start();
             self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
             let target = self.selection.read();
-            let pc = self
-                .pending_changes
-                .entry((target, PARAM_REVEAL_DURATION))
-                .read();
+            let pc = self.pending_changes.entry((target, PARAM_REVEAL_DURATION)).read();
             assert(pc.exists, 'NoPendingChange');
             assert(get_block_timestamp() >= pc.effective_at, 'TimelockNotElapsed');
             self
@@ -361,11 +352,12 @@ pub mod AdminTimelock {
                 .write(PendingChange { new_value: 0, effective_at: 0, exists: false });
             ISelectionDispatcher { contract_address: target }
                 .execute_set_reveal_duration(pc.new_value.try_into().unwrap());
-            self.emit(ChangeExecuted {
-                target,
-                param_key: PARAM_REVEAL_DURATION,
-                new_value: pc.new_value,
-            });
+            self
+                .emit(
+                    ChangeExecuted {
+                        target, param_key: PARAM_REVEAL_DURATION, new_value: pc.new_value,
+                    },
+                );
             self.reentrancyguard.end();
         }
 
@@ -377,22 +369,22 @@ pub mod AdminTimelock {
                 .pending_changes
                 .entry((self.selection.read(), PARAM_NON_REVEAL_SLASH_BPS))
                 .write(PendingChange { new_value: bps.into(), effective_at, exists: true });
-            self.emit(ChangeProposed {
-                target: self.selection.read(),
-                param_key: PARAM_NON_REVEAL_SLASH_BPS,
-                new_value: bps.into(),
-                effective_at,
-            });
+            self
+                .emit(
+                    ChangeProposed {
+                        target: self.selection.read(),
+                        param_key: PARAM_NON_REVEAL_SLASH_BPS,
+                        new_value: bps.into(),
+                        effective_at,
+                    },
+                );
         }
 
         fn execute_set_non_reveal_slash_bps(ref self: ContractState) {
             self.reentrancyguard.start();
             self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
             let target = self.selection.read();
-            let pc = self
-                .pending_changes
-                .entry((target, PARAM_NON_REVEAL_SLASH_BPS))
-                .read();
+            let pc = self.pending_changes.entry((target, PARAM_NON_REVEAL_SLASH_BPS)).read();
             assert(pc.exists, 'NoPendingChange');
             assert(get_block_timestamp() >= pc.effective_at, 'TimelockNotElapsed');
             self
@@ -401,11 +393,12 @@ pub mod AdminTimelock {
                 .write(PendingChange { new_value: 0, effective_at: 0, exists: false });
             ISelectionDispatcher { contract_address: target }
                 .execute_set_non_reveal_slash_bps(pc.new_value.try_into().unwrap());
-            self.emit(ChangeExecuted {
-                target,
-                param_key: PARAM_NON_REVEAL_SLASH_BPS,
-                new_value: pc.new_value,
-            });
+            self
+                .emit(
+                    ChangeExecuted {
+                        target, param_key: PARAM_NON_REVEAL_SLASH_BPS, new_value: pc.new_value,
+                    },
+                );
             self.reentrancyguard.end();
         }
 
@@ -417,22 +410,22 @@ pub mod AdminTimelock {
                 .pending_changes
                 .entry((self.selection.read(), PARAM_INCOHERENCE_SLASH_BPS))
                 .write(PendingChange { new_value: bps.into(), effective_at, exists: true });
-            self.emit(ChangeProposed {
-                target: self.selection.read(),
-                param_key: PARAM_INCOHERENCE_SLASH_BPS,
-                new_value: bps.into(),
-                effective_at,
-            });
+            self
+                .emit(
+                    ChangeProposed {
+                        target: self.selection.read(),
+                        param_key: PARAM_INCOHERENCE_SLASH_BPS,
+                        new_value: bps.into(),
+                        effective_at,
+                    },
+                );
         }
 
         fn execute_set_incoherence_slash_bps(ref self: ContractState) {
             self.reentrancyguard.start();
             self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
             let target = self.selection.read();
-            let pc = self
-                .pending_changes
-                .entry((target, PARAM_INCOHERENCE_SLASH_BPS))
-                .read();
+            let pc = self.pending_changes.entry((target, PARAM_INCOHERENCE_SLASH_BPS)).read();
             assert(pc.exists, 'NoPendingChange');
             assert(get_block_timestamp() >= pc.effective_at, 'TimelockNotElapsed');
             self
@@ -441,11 +434,12 @@ pub mod AdminTimelock {
                 .write(PendingChange { new_value: 0, effective_at: 0, exists: false });
             ISelectionDispatcher { contract_address: target }
                 .execute_set_incoherence_slash_bps(pc.new_value.try_into().unwrap());
-            self.emit(ChangeExecuted {
-                target,
-                param_key: PARAM_INCOHERENCE_SLASH_BPS,
-                new_value: pc.new_value,
-            });
+            self
+                .emit(
+                    ChangeExecuted {
+                        target, param_key: PARAM_INCOHERENCE_SLASH_BPS, new_value: pc.new_value,
+                    },
+                );
             self.reentrancyguard.end();
         }
 
@@ -457,22 +451,22 @@ pub mod AdminTimelock {
                 .pending_changes
                 .entry((self.selection.read(), PARAM_COHERENCE_BAND))
                 .write(PendingChange { new_value: band.into(), effective_at, exists: true });
-            self.emit(ChangeProposed {
-                target: self.selection.read(),
-                param_key: PARAM_COHERENCE_BAND,
-                new_value: band.into(),
-                effective_at,
-            });
+            self
+                .emit(
+                    ChangeProposed {
+                        target: self.selection.read(),
+                        param_key: PARAM_COHERENCE_BAND,
+                        new_value: band.into(),
+                        effective_at,
+                    },
+                );
         }
 
         fn execute_set_coherence_band(ref self: ContractState) {
             self.reentrancyguard.start();
             self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
             let target = self.selection.read();
-            let pc = self
-                .pending_changes
-                .entry((target, PARAM_COHERENCE_BAND))
-                .read();
+            let pc = self.pending_changes.entry((target, PARAM_COHERENCE_BAND)).read();
             assert(pc.exists, 'NoPendingChange');
             assert(get_block_timestamp() >= pc.effective_at, 'TimelockNotElapsed');
             self
@@ -481,11 +475,12 @@ pub mod AdminTimelock {
                 .write(PendingChange { new_value: 0, effective_at: 0, exists: false });
             ISelectionDispatcher { contract_address: target }
                 .execute_set_coherence_band(pc.new_value.try_into().unwrap());
-            self.emit(ChangeExecuted {
-                target,
-                param_key: PARAM_COHERENCE_BAND,
-                new_value: pc.new_value,
-            });
+            self
+                .emit(
+                    ChangeExecuted {
+                        target, param_key: PARAM_COHERENCE_BAND, new_value: pc.new_value,
+                    },
+                );
             self.reentrancyguard.end();
         }
 
@@ -498,22 +493,22 @@ pub mod AdminTimelock {
                 .pending_changes
                 .entry((self.selection.read(), PARAM_EVALUATION_COOLDOWN))
                 .write(PendingChange { new_value: cooldown.into(), effective_at, exists: true });
-            self.emit(ChangeProposed {
-                target: self.selection.read(),
-                param_key: PARAM_EVALUATION_COOLDOWN,
-                new_value: cooldown.into(),
-                effective_at,
-            });
+            self
+                .emit(
+                    ChangeProposed {
+                        target: self.selection.read(),
+                        param_key: PARAM_EVALUATION_COOLDOWN,
+                        new_value: cooldown.into(),
+                        effective_at,
+                    },
+                );
         }
 
         fn execute_set_evaluation_cooldown(ref self: ContractState) {
             self.reentrancyguard.start();
             self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
             let target = self.selection.read();
-            let pc = self
-                .pending_changes
-                .entry((target, PARAM_EVALUATION_COOLDOWN))
-                .read();
+            let pc = self.pending_changes.entry((target, PARAM_EVALUATION_COOLDOWN)).read();
             assert(pc.exists, 'NoPendingChange');
             assert(get_block_timestamp() >= pc.effective_at, 'TimelockNotElapsed');
             self
@@ -522,11 +517,12 @@ pub mod AdminTimelock {
                 .write(PendingChange { new_value: 0, effective_at: 0, exists: false });
             ISelectionDispatcher { contract_address: target }
                 .execute_set_evaluation_cooldown(pc.new_value.try_into().unwrap());
-            self.emit(ChangeExecuted {
-                target,
-                param_key: PARAM_EVALUATION_COOLDOWN,
-                new_value: pc.new_value,
-            });
+            self
+                .emit(
+                    ChangeExecuted {
+                        target, param_key: PARAM_EVALUATION_COOLDOWN, new_value: pc.new_value,
+                    },
+                );
             self.reentrancyguard.end();
         }
 
@@ -539,22 +535,22 @@ pub mod AdminTimelock {
                 .pending_changes
                 .entry((self.selection.read(), PARAM_APPLYING_DURATION))
                 .write(PendingChange { new_value: duration.into(), effective_at, exists: true });
-            self.emit(ChangeProposed {
-                target: self.selection.read(),
-                param_key: PARAM_APPLYING_DURATION,
-                new_value: duration.into(),
-                effective_at,
-            });
+            self
+                .emit(
+                    ChangeProposed {
+                        target: self.selection.read(),
+                        param_key: PARAM_APPLYING_DURATION,
+                        new_value: duration.into(),
+                        effective_at,
+                    },
+                );
         }
 
         fn execute_set_applying_duration(ref self: ContractState) {
             self.reentrancyguard.start();
             self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
             let target = self.selection.read();
-            let pc = self
-                .pending_changes
-                .entry((target, PARAM_APPLYING_DURATION))
-                .read();
+            let pc = self.pending_changes.entry((target, PARAM_APPLYING_DURATION)).read();
             assert(pc.exists, 'NoPendingChange');
             assert(get_block_timestamp() >= pc.effective_at, 'TimelockNotElapsed');
             self
@@ -563,11 +559,12 @@ pub mod AdminTimelock {
                 .write(PendingChange { new_value: 0, effective_at: 0, exists: false });
             ISelectionDispatcher { contract_address: target }
                 .execute_set_applying_duration(pc.new_value.try_into().unwrap());
-            self.emit(ChangeExecuted {
-                target,
-                param_key: PARAM_APPLYING_DURATION,
-                new_value: pc.new_value,
-            });
+            self
+                .emit(
+                    ChangeExecuted {
+                        target, param_key: PARAM_APPLYING_DURATION, new_value: pc.new_value,
+                    },
+                );
             self.reentrancyguard.end();
         }
 
@@ -579,22 +576,22 @@ pub mod AdminTimelock {
                 .pending_changes
                 .entry((self.selection.read(), PARAM_MIN_STAKE_IDS))
                 .write(PendingChange { new_value: count.into(), effective_at, exists: true });
-            self.emit(ChangeProposed {
-                target: self.selection.read(),
-                param_key: PARAM_MIN_STAKE_IDS,
-                new_value: count.into(),
-                effective_at,
-            });
+            self
+                .emit(
+                    ChangeProposed {
+                        target: self.selection.read(),
+                        param_key: PARAM_MIN_STAKE_IDS,
+                        new_value: count.into(),
+                        effective_at,
+                    },
+                );
         }
 
         fn execute_set_min_stake_ids(ref self: ContractState) {
             self.reentrancyguard.start();
             self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
             let target = self.selection.read();
-            let pc = self
-                .pending_changes
-                .entry((target, PARAM_MIN_STAKE_IDS))
-                .read();
+            let pc = self.pending_changes.entry((target, PARAM_MIN_STAKE_IDS)).read();
             assert(pc.exists, 'NoPendingChange');
             assert(get_block_timestamp() >= pc.effective_at, 'TimelockNotElapsed');
             self
@@ -603,11 +600,12 @@ pub mod AdminTimelock {
                 .write(PendingChange { new_value: 0, effective_at: 0, exists: false });
             ISelectionDispatcher { contract_address: target }
                 .execute_set_min_stake_ids(pc.new_value.try_into().unwrap());
-            self.emit(ChangeExecuted {
-                target,
-                param_key: PARAM_MIN_STAKE_IDS,
-                new_value: pc.new_value,
-            });
+            self
+                .emit(
+                    ChangeExecuted {
+                        target, param_key: PARAM_MIN_STAKE_IDS, new_value: pc.new_value,
+                    },
+                );
             self.reentrancyguard.end();
         }
 
@@ -620,22 +618,22 @@ pub mod AdminTimelock {
                 .pending_changes
                 .entry((self.selection.read(), PARAM_MIN_JURORS))
                 .write(PendingChange { new_value: count.into(), effective_at, exists: true });
-            self.emit(ChangeProposed {
-                target: self.selection.read(),
-                param_key: PARAM_MIN_JURORS,
-                new_value: count.into(),
-                effective_at,
-            });
+            self
+                .emit(
+                    ChangeProposed {
+                        target: self.selection.read(),
+                        param_key: PARAM_MIN_JURORS,
+                        new_value: count.into(),
+                        effective_at,
+                    },
+                );
         }
 
         fn execute_set_min_jurors(ref self: ContractState) {
             self.reentrancyguard.start();
             self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
             let target = self.selection.read();
-            let pc = self
-                .pending_changes
-                .entry((target, PARAM_MIN_JURORS))
-                .read();
+            let pc = self.pending_changes.entry((target, PARAM_MIN_JURORS)).read();
             assert(pc.exists, 'NoPendingChange');
             assert(get_block_timestamp() >= pc.effective_at, 'TimelockNotElapsed');
             self
@@ -644,11 +642,10 @@ pub mod AdminTimelock {
                 .write(PendingChange { new_value: 0, effective_at: 0, exists: false });
             ISelectionDispatcher { contract_address: target }
                 .execute_set_min_jurors(pc.new_value.try_into().unwrap());
-            self.emit(ChangeExecuted {
-                target,
-                param_key: PARAM_MIN_JURORS,
-                new_value: pc.new_value,
-            });
+            self
+                .emit(
+                    ChangeExecuted { target, param_key: PARAM_MIN_JURORS, new_value: pc.new_value },
+                );
             self.reentrancyguard.end();
         }
 
@@ -661,22 +658,22 @@ pub mod AdminTimelock {
                 .pending_changes
                 .entry((self.selection.read(), PARAM_MAX_EVALUATIONS_PER_STAKE))
                 .write(PendingChange { new_value: count.into(), effective_at, exists: true });
-            self.emit(ChangeProposed {
-                target: self.selection.read(),
-                param_key: PARAM_MAX_EVALUATIONS_PER_STAKE,
-                new_value: count.into(),
-                effective_at,
-            });
+            self
+                .emit(
+                    ChangeProposed {
+                        target: self.selection.read(),
+                        param_key: PARAM_MAX_EVALUATIONS_PER_STAKE,
+                        new_value: count.into(),
+                        effective_at,
+                    },
+                );
         }
 
         fn execute_set_max_evaluations_per_stake(ref self: ContractState) {
             self.reentrancyguard.start();
             self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
             let target = self.selection.read();
-            let pc = self
-                .pending_changes
-                .entry((target, PARAM_MAX_EVALUATIONS_PER_STAKE))
-                .read();
+            let pc = self.pending_changes.entry((target, PARAM_MAX_EVALUATIONS_PER_STAKE)).read();
             assert(pc.exists, 'NoPendingChange');
             assert(get_block_timestamp() >= pc.effective_at, 'TimelockNotElapsed');
             self
@@ -685,11 +682,12 @@ pub mod AdminTimelock {
                 .write(PendingChange { new_value: 0, effective_at: 0, exists: false });
             ISelectionDispatcher { contract_address: target }
                 .execute_set_max_evaluations_per_stake(pc.new_value.try_into().unwrap());
-            self.emit(ChangeExecuted {
-                target,
-                param_key: PARAM_MAX_EVALUATIONS_PER_STAKE,
-                new_value: pc.new_value,
-            });
+            self
+                .emit(
+                    ChangeExecuted {
+                        target, param_key: PARAM_MAX_EVALUATIONS_PER_STAKE, new_value: pc.new_value,
+                    },
+                );
             self.reentrancyguard.end();
         }
 
@@ -702,22 +700,22 @@ pub mod AdminTimelock {
                 .pending_changes
                 .entry((self.selection.read(), PARAM_JUROR_REWARD_AMOUNT))
                 .write(PendingChange { new_value: amount, effective_at, exists: true });
-            self.emit(ChangeProposed {
-                target: self.selection.read(),
-                param_key: PARAM_JUROR_REWARD_AMOUNT,
-                new_value: amount,
-                effective_at,
-            });
+            self
+                .emit(
+                    ChangeProposed {
+                        target: self.selection.read(),
+                        param_key: PARAM_JUROR_REWARD_AMOUNT,
+                        new_value: amount,
+                        effective_at,
+                    },
+                );
         }
 
         fn execute_set_juror_reward_amount(ref self: ContractState) {
             self.reentrancyguard.start();
             self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
             let target = self.selection.read();
-            let pc = self
-                .pending_changes
-                .entry((target, PARAM_JUROR_REWARD_AMOUNT))
-                .read();
+            let pc = self.pending_changes.entry((target, PARAM_JUROR_REWARD_AMOUNT)).read();
             assert(pc.exists, 'NoPendingChange');
             assert(get_block_timestamp() >= pc.effective_at, 'TimelockNotElapsed');
             self
@@ -726,11 +724,12 @@ pub mod AdminTimelock {
                 .write(PendingChange { new_value: 0, effective_at: 0, exists: false });
             ISelectionDispatcher { contract_address: target }
                 .execute_set_juror_reward_amount(pc.new_value);
-            self.emit(ChangeExecuted {
-                target,
-                param_key: PARAM_JUROR_REWARD_AMOUNT,
-                new_value: pc.new_value,
-            });
+            self
+                .emit(
+                    ChangeExecuted {
+                        target, param_key: PARAM_JUROR_REWARD_AMOUNT, new_value: pc.new_value,
+                    },
+                );
             self.reentrancyguard.end();
         }
 
@@ -743,22 +742,22 @@ pub mod AdminTimelock {
                 .pending_changes
                 .entry((self.selection.read(), PARAM_DRAWING_DURATION))
                 .write(PendingChange { new_value: duration.into(), effective_at, exists: true });
-            self.emit(ChangeProposed {
-                target: self.selection.read(),
-                param_key: PARAM_DRAWING_DURATION,
-                new_value: duration.into(),
-                effective_at,
-            });
+            self
+                .emit(
+                    ChangeProposed {
+                        target: self.selection.read(),
+                        param_key: PARAM_DRAWING_DURATION,
+                        new_value: duration.into(),
+                        effective_at,
+                    },
+                );
         }
 
         fn execute_set_drawing_duration(ref self: ContractState) {
             self.reentrancyguard.start();
             self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
             let target = self.selection.read();
-            let pc = self
-                .pending_changes
-                .entry((target, PARAM_DRAWING_DURATION))
-                .read();
+            let pc = self.pending_changes.entry((target, PARAM_DRAWING_DURATION)).read();
             assert(pc.exists, 'NoPendingChange');
             assert(get_block_timestamp() >= pc.effective_at, 'TimelockNotElapsed');
             self
@@ -767,11 +766,12 @@ pub mod AdminTimelock {
                 .write(PendingChange { new_value: 0, effective_at: 0, exists: false });
             ISelectionDispatcher { contract_address: target }
                 .execute_set_drawing_duration(pc.new_value.try_into().unwrap());
-            self.emit(ChangeExecuted {
-                target,
-                param_key: PARAM_DRAWING_DURATION,
-                new_value: pc.new_value,
-            });
+            self
+                .emit(
+                    ChangeExecuted {
+                        target, param_key: PARAM_DRAWING_DURATION, new_value: pc.new_value,
+                    },
+                );
             self.reentrancyguard.end();
         }
 
@@ -785,22 +785,22 @@ pub mod AdminTimelock {
                 .pending_changes
                 .entry((self.selection.read(), PARAM_VRF_PROVIDER))
                 .write(PendingChange { new_value: provider_u256, effective_at, exists: true });
-            self.emit(ChangeProposed {
-                target: self.selection.read(),
-                param_key: PARAM_VRF_PROVIDER,
-                new_value: provider_u256,
-                effective_at,
-            });
+            self
+                .emit(
+                    ChangeProposed {
+                        target: self.selection.read(),
+                        param_key: PARAM_VRF_PROVIDER,
+                        new_value: provider_u256,
+                        effective_at,
+                    },
+                );
         }
 
         fn execute_set_vrf_provider(ref self: ContractState) {
             self.reentrancyguard.start();
             self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
             let target = self.selection.read();
-            let pc = self
-                .pending_changes
-                .entry((target, PARAM_VRF_PROVIDER))
-                .read();
+            let pc = self.pending_changes.entry((target, PARAM_VRF_PROVIDER)).read();
             assert(pc.exists, 'NoPendingChange');
             assert(get_block_timestamp() >= pc.effective_at, 'TimelockNotElapsed');
             self
@@ -811,11 +811,12 @@ pub mod AdminTimelock {
             let provider_addr: ContractAddress = provider_felt.try_into().unwrap();
             ISelectionDispatcher { contract_address: target }
                 .execute_set_vrf_provider(provider_addr);
-            self.emit(ChangeExecuted {
-                target,
-                param_key: PARAM_VRF_PROVIDER,
-                new_value: pc.new_value,
-            });
+            self
+                .emit(
+                    ChangeExecuted {
+                        target, param_key: PARAM_VRF_PROVIDER, new_value: pc.new_value,
+                    },
+                );
             self.reentrancyguard.end();
         }
 
@@ -831,22 +832,22 @@ pub mod AdminTimelock {
                 .pending_changes
                 .entry((self.token.read(), PARAM_DECAY_RATE_BPS))
                 .write(PendingChange { new_value: bps.into(), effective_at, exists: true });
-            self.emit(ChangeProposed {
-                target: self.token.read(),
-                param_key: PARAM_DECAY_RATE_BPS,
-                new_value: bps.into(),
-                effective_at,
-            });
+            self
+                .emit(
+                    ChangeProposed {
+                        target: self.token.read(),
+                        param_key: PARAM_DECAY_RATE_BPS,
+                        new_value: bps.into(),
+                        effective_at,
+                    },
+                );
         }
 
         fn execute_set_decay_rate_bps(ref self: ContractState) {
             self.reentrancyguard.start();
             self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
             let target = self.token.read();
-            let pc = self
-                .pending_changes
-                .entry((target, PARAM_DECAY_RATE_BPS))
-                .read();
+            let pc = self.pending_changes.entry((target, PARAM_DECAY_RATE_BPS)).read();
             assert(pc.exists, 'NoPendingChange');
             assert(get_block_timestamp() >= pc.effective_at, 'TimelockNotElapsed');
             self
@@ -855,11 +856,12 @@ pub mod AdminTimelock {
                 .write(PendingChange { new_value: 0, effective_at: 0, exists: false });
             IConvictionTokenDispatcher { contract_address: target }
                 .execute_set_decay_rate_bps(pc.new_value.try_into().unwrap());
-            self.emit(ChangeExecuted {
-                target,
-                param_key: PARAM_DECAY_RATE_BPS,
-                new_value: pc.new_value,
-            });
+            self
+                .emit(
+                    ChangeExecuted {
+                        target, param_key: PARAM_DECAY_RATE_BPS, new_value: pc.new_value,
+                    },
+                );
             self.reentrancyguard.end();
         }
 
@@ -871,22 +873,22 @@ pub mod AdminTimelock {
                 .pending_changes
                 .entry((self.token.read(), PARAM_MIN_DECAY_FOR_REWARD))
                 .write(PendingChange { new_value: amount, effective_at, exists: true });
-            self.emit(ChangeProposed {
-                target: self.token.read(),
-                param_key: PARAM_MIN_DECAY_FOR_REWARD,
-                new_value: amount,
-                effective_at,
-            });
+            self
+                .emit(
+                    ChangeProposed {
+                        target: self.token.read(),
+                        param_key: PARAM_MIN_DECAY_FOR_REWARD,
+                        new_value: amount,
+                        effective_at,
+                    },
+                );
         }
 
         fn execute_set_min_decay_for_reward(ref self: ContractState) {
             self.reentrancyguard.start();
             self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
             let target = self.token.read();
-            let pc = self
-                .pending_changes
-                .entry((target, PARAM_MIN_DECAY_FOR_REWARD))
-                .read();
+            let pc = self.pending_changes.entry((target, PARAM_MIN_DECAY_FOR_REWARD)).read();
             assert(pc.exists, 'NoPendingChange');
             assert(get_block_timestamp() >= pc.effective_at, 'TimelockNotElapsed');
             self
@@ -895,11 +897,12 @@ pub mod AdminTimelock {
                 .write(PendingChange { new_value: 0, effective_at: 0, exists: false });
             IConvictionTokenDispatcher { contract_address: target }
                 .execute_set_min_decay_for_reward(pc.new_value);
-            self.emit(ChangeExecuted {
-                target,
-                param_key: PARAM_MIN_DECAY_FOR_REWARD,
-                new_value: pc.new_value,
-            });
+            self
+                .emit(
+                    ChangeExecuted {
+                        target, param_key: PARAM_MIN_DECAY_FOR_REWARD, new_value: pc.new_value,
+                    },
+                );
             self.reentrancyguard.end();
         }
 
@@ -911,22 +914,22 @@ pub mod AdminTimelock {
                 .pending_changes
                 .entry((self.token.read(), PARAM_CALLER_REWARD_AMOUNT))
                 .write(PendingChange { new_value: amount, effective_at, exists: true });
-            self.emit(ChangeProposed {
-                target: self.token.read(),
-                param_key: PARAM_CALLER_REWARD_AMOUNT,
-                new_value: amount,
-                effective_at,
-            });
+            self
+                .emit(
+                    ChangeProposed {
+                        target: self.token.read(),
+                        param_key: PARAM_CALLER_REWARD_AMOUNT,
+                        new_value: amount,
+                        effective_at,
+                    },
+                );
         }
 
         fn execute_set_caller_reward_amount(ref self: ContractState) {
             self.reentrancyguard.start();
             self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
             let target = self.token.read();
-            let pc = self
-                .pending_changes
-                .entry((target, PARAM_CALLER_REWARD_AMOUNT))
-                .read();
+            let pc = self.pending_changes.entry((target, PARAM_CALLER_REWARD_AMOUNT)).read();
             assert(pc.exists, 'NoPendingChange');
             assert(get_block_timestamp() >= pc.effective_at, 'TimelockNotElapsed');
             self
@@ -935,11 +938,12 @@ pub mod AdminTimelock {
                 .write(PendingChange { new_value: 0, effective_at: 0, exists: false });
             IConvictionTokenDispatcher { contract_address: target }
                 .execute_set_caller_reward_amount(pc.new_value);
-            self.emit(ChangeExecuted {
-                target,
-                param_key: PARAM_CALLER_REWARD_AMOUNT,
-                new_value: pc.new_value,
-            });
+            self
+                .emit(
+                    ChangeExecuted {
+                        target, param_key: PARAM_CALLER_REWARD_AMOUNT, new_value: pc.new_value,
+                    },
+                );
             self.reentrancyguard.end();
         }
 
@@ -951,22 +955,22 @@ pub mod AdminTimelock {
                 .pending_changes
                 .entry((self.token.read(), PARAM_INFLATION_RATE_BPS))
                 .write(PendingChange { new_value: bps.into(), effective_at, exists: true });
-            self.emit(ChangeProposed {
-                target: self.token.read(),
-                param_key: PARAM_INFLATION_RATE_BPS,
-                new_value: bps.into(),
-                effective_at,
-            });
+            self
+                .emit(
+                    ChangeProposed {
+                        target: self.token.read(),
+                        param_key: PARAM_INFLATION_RATE_BPS,
+                        new_value: bps.into(),
+                        effective_at,
+                    },
+                );
         }
 
         fn execute_set_inflation_rate_bps(ref self: ContractState) {
             self.reentrancyguard.start();
             self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
             let target = self.token.read();
-            let pc = self
-                .pending_changes
-                .entry((target, PARAM_INFLATION_RATE_BPS))
-                .read();
+            let pc = self.pending_changes.entry((target, PARAM_INFLATION_RATE_BPS)).read();
             assert(pc.exists, 'NoPendingChange');
             assert(get_block_timestamp() >= pc.effective_at, 'TimelockNotElapsed');
             self
@@ -975,11 +979,12 @@ pub mod AdminTimelock {
                 .write(PendingChange { new_value: 0, effective_at: 0, exists: false });
             IConvictionTokenDispatcher { contract_address: target }
                 .execute_set_inflation_rate_bps(pc.new_value.try_into().unwrap());
-            self.emit(ChangeExecuted {
-                target,
-                param_key: PARAM_INFLATION_RATE_BPS,
-                new_value: pc.new_value,
-            });
+            self
+                .emit(
+                    ChangeExecuted {
+                        target, param_key: PARAM_INFLATION_RATE_BPS, new_value: pc.new_value,
+                    },
+                );
             self.reentrancyguard.end();
         }
 
@@ -996,22 +1001,22 @@ pub mod AdminTimelock {
                 .pending_changes
                 .entry((self.governance.read(), PARAM_REPUTATION_STAKE))
                 .write(PendingChange { new_value: amount, effective_at, exists: true });
-            self.emit(ChangeProposed {
-                target: self.governance.read(),
-                param_key: PARAM_REPUTATION_STAKE,
-                new_value: amount,
-                effective_at,
-            });
+            self
+                .emit(
+                    ChangeProposed {
+                        target: self.governance.read(),
+                        param_key: PARAM_REPUTATION_STAKE,
+                        new_value: amount,
+                        effective_at,
+                    },
+                );
         }
 
         fn execute_set_reputation_stake(ref self: ContractState) {
             self.reentrancyguard.start();
             self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
             let target = self.governance.read();
-            let pc = self
-                .pending_changes
-                .entry((target, PARAM_REPUTATION_STAKE))
-                .read();
+            let pc = self.pending_changes.entry((target, PARAM_REPUTATION_STAKE)).read();
             assert(pc.exists, 'NoPendingChange');
             assert(get_block_timestamp() >= pc.effective_at, 'TimelockNotElapsed');
             self
@@ -1020,11 +1025,12 @@ pub mod AdminTimelock {
                 .write(PendingChange { new_value: 0, effective_at: 0, exists: false });
             IGovernanceDispatcher { contract_address: target }
                 .execute_set_reputation_stake(pc.new_value);
-            self.emit(ChangeExecuted {
-                target,
-                param_key: PARAM_REPUTATION_STAKE,
-                new_value: pc.new_value,
-            });
+            self
+                .emit(
+                    ChangeExecuted {
+                        target, param_key: PARAM_REPUTATION_STAKE, new_value: pc.new_value,
+                    },
+                );
             self.reentrancyguard.end();
         }
 
@@ -1037,22 +1043,22 @@ pub mod AdminTimelock {
                 .pending_changes
                 .entry((self.governance.read(), PARAM_CONVICTION_THRESHOLD))
                 .write(PendingChange { new_value: amount, effective_at, exists: true });
-            self.emit(ChangeProposed {
-                target: self.governance.read(),
-                param_key: PARAM_CONVICTION_THRESHOLD,
-                new_value: amount,
-                effective_at,
-            });
+            self
+                .emit(
+                    ChangeProposed {
+                        target: self.governance.read(),
+                        param_key: PARAM_CONVICTION_THRESHOLD,
+                        new_value: amount,
+                        effective_at,
+                    },
+                );
         }
 
         fn execute_set_conviction_threshold(ref self: ContractState) {
             self.reentrancyguard.start();
             self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
             let target = self.governance.read();
-            let pc = self
-                .pending_changes
-                .entry((target, PARAM_CONVICTION_THRESHOLD))
-                .read();
+            let pc = self.pending_changes.entry((target, PARAM_CONVICTION_THRESHOLD)).read();
             assert(pc.exists, 'NoPendingChange');
             assert(get_block_timestamp() >= pc.effective_at, 'TimelockNotElapsed');
             self
@@ -1061,11 +1067,12 @@ pub mod AdminTimelock {
                 .write(PendingChange { new_value: 0, effective_at: 0, exists: false });
             IGovernanceDispatcher { contract_address: target }
                 .execute_set_conviction_threshold(pc.new_value);
-            self.emit(ChangeExecuted {
-                target,
-                param_key: PARAM_CONVICTION_THRESHOLD,
-                new_value: pc.new_value,
-            });
+            self
+                .emit(
+                    ChangeExecuted {
+                        target, param_key: PARAM_CONVICTION_THRESHOLD, new_value: pc.new_value,
+                    },
+                );
             self.reentrancyguard.end();
         }
 
@@ -1078,22 +1085,22 @@ pub mod AdminTimelock {
                 .pending_changes
                 .entry((self.governance.read(), PARAM_REWARD_MULTIPLIER))
                 .write(PendingChange { new_value: amount, effective_at, exists: true });
-            self.emit(ChangeProposed {
-                target: self.governance.read(),
-                param_key: PARAM_REWARD_MULTIPLIER,
-                new_value: amount,
-                effective_at,
-            });
+            self
+                .emit(
+                    ChangeProposed {
+                        target: self.governance.read(),
+                        param_key: PARAM_REWARD_MULTIPLIER,
+                        new_value: amount,
+                        effective_at,
+                    },
+                );
         }
 
         fn execute_set_reward_multiplier(ref self: ContractState) {
             self.reentrancyguard.start();
             self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
             let target = self.governance.read();
-            let pc = self
-                .pending_changes
-                .entry((target, PARAM_REWARD_MULTIPLIER))
-                .read();
+            let pc = self.pending_changes.entry((target, PARAM_REWARD_MULTIPLIER)).read();
             assert(pc.exists, 'NoPendingChange');
             assert(get_block_timestamp() >= pc.effective_at, 'TimelockNotElapsed');
             self
@@ -1102,11 +1109,12 @@ pub mod AdminTimelock {
                 .write(PendingChange { new_value: 0, effective_at: 0, exists: false });
             IGovernanceDispatcher { contract_address: target }
                 .execute_set_reward_multiplier(pc.new_value);
-            self.emit(ChangeExecuted {
-                target,
-                param_key: PARAM_REWARD_MULTIPLIER,
-                new_value: pc.new_value,
-            });
+            self
+                .emit(
+                    ChangeExecuted {
+                        target, param_key: PARAM_REWARD_MULTIPLIER, new_value: pc.new_value,
+                    },
+                );
             self.reentrancyguard.end();
         }
 
@@ -1119,22 +1127,22 @@ pub mod AdminTimelock {
                 .pending_changes
                 .entry((self.governance.read(), PARAM_MINI_REWARD_MULTIPLIER))
                 .write(PendingChange { new_value: amount, effective_at, exists: true });
-            self.emit(ChangeProposed {
-                target: self.governance.read(),
-                param_key: PARAM_MINI_REWARD_MULTIPLIER,
-                new_value: amount,
-                effective_at,
-            });
+            self
+                .emit(
+                    ChangeProposed {
+                        target: self.governance.read(),
+                        param_key: PARAM_MINI_REWARD_MULTIPLIER,
+                        new_value: amount,
+                        effective_at,
+                    },
+                );
         }
 
         fn execute_set_mini_reward_multiplier(ref self: ContractState) {
             self.reentrancyguard.start();
             self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
             let target = self.governance.read();
-            let pc = self
-                .pending_changes
-                .entry((target, PARAM_MINI_REWARD_MULTIPLIER))
-                .read();
+            let pc = self.pending_changes.entry((target, PARAM_MINI_REWARD_MULTIPLIER)).read();
             assert(pc.exists, 'NoPendingChange');
             assert(get_block_timestamp() >= pc.effective_at, 'TimelockNotElapsed');
             self
@@ -1143,11 +1151,12 @@ pub mod AdminTimelock {
                 .write(PendingChange { new_value: 0, effective_at: 0, exists: false });
             IGovernanceDispatcher { contract_address: target }
                 .execute_set_mini_reward_multiplier(pc.new_value);
-            self.emit(ChangeExecuted {
-                target,
-                param_key: PARAM_MINI_REWARD_MULTIPLIER,
-                new_value: pc.new_value,
-            });
+            self
+                .emit(
+                    ChangeExecuted {
+                        target, param_key: PARAM_MINI_REWARD_MULTIPLIER, new_value: pc.new_value,
+                    },
+                );
             self.reentrancyguard.end();
         }
 
@@ -1160,22 +1169,22 @@ pub mod AdminTimelock {
                 .pending_changes
                 .entry((self.governance.read(), PARAM_CONVICTION_BASE_LOCK))
                 .write(PendingChange { new_value: duration.into(), effective_at, exists: true });
-            self.emit(ChangeProposed {
-                target: self.governance.read(),
-                param_key: PARAM_CONVICTION_BASE_LOCK,
-                new_value: duration.into(),
-                effective_at,
-            });
+            self
+                .emit(
+                    ChangeProposed {
+                        target: self.governance.read(),
+                        param_key: PARAM_CONVICTION_BASE_LOCK,
+                        new_value: duration.into(),
+                        effective_at,
+                    },
+                );
         }
 
         fn execute_set_conviction_base_lock(ref self: ContractState) {
             self.reentrancyguard.start();
             self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
             let target = self.governance.read();
-            let pc = self
-                .pending_changes
-                .entry((target, PARAM_CONVICTION_BASE_LOCK))
-                .read();
+            let pc = self.pending_changes.entry((target, PARAM_CONVICTION_BASE_LOCK)).read();
             assert(pc.exists, 'NoPendingChange');
             assert(get_block_timestamp() >= pc.effective_at, 'TimelockNotElapsed');
             self
@@ -1184,11 +1193,12 @@ pub mod AdminTimelock {
                 .write(PendingChange { new_value: 0, effective_at: 0, exists: false });
             IGovernanceDispatcher { contract_address: target }
                 .execute_set_conviction_base_lock(pc.new_value.try_into().unwrap());
-            self.emit(ChangeExecuted {
-                target,
-                param_key: PARAM_CONVICTION_BASE_LOCK,
-                new_value: pc.new_value,
-            });
+            self
+                .emit(
+                    ChangeExecuted {
+                        target, param_key: PARAM_CONVICTION_BASE_LOCK, new_value: pc.new_value,
+                    },
+                );
             self.reentrancyguard.end();
         }
 
@@ -1201,22 +1211,22 @@ pub mod AdminTimelock {
                 .pending_changes
                 .entry((self.governance.read(), PARAM_MAX_VOTES_PER_CONVICTION))
                 .write(PendingChange { new_value: count.into(), effective_at, exists: true });
-            self.emit(ChangeProposed {
-                target: self.governance.read(),
-                param_key: PARAM_MAX_VOTES_PER_CONVICTION,
-                new_value: count.into(),
-                effective_at,
-            });
+            self
+                .emit(
+                    ChangeProposed {
+                        target: self.governance.read(),
+                        param_key: PARAM_MAX_VOTES_PER_CONVICTION,
+                        new_value: count.into(),
+                        effective_at,
+                    },
+                );
         }
 
         fn execute_set_max_votes_per_conviction(ref self: ContractState) {
             self.reentrancyguard.start();
             self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
             let target = self.governance.read();
-            let pc = self
-                .pending_changes
-                .entry((target, PARAM_MAX_VOTES_PER_CONVICTION))
-                .read();
+            let pc = self.pending_changes.entry((target, PARAM_MAX_VOTES_PER_CONVICTION)).read();
             assert(pc.exists, 'NoPendingChange');
             assert(get_block_timestamp() >= pc.effective_at, 'TimelockNotElapsed');
             self
@@ -1225,11 +1235,12 @@ pub mod AdminTimelock {
                 .write(PendingChange { new_value: 0, effective_at: 0, exists: false });
             IGovernanceDispatcher { contract_address: target }
                 .execute_set_max_votes_per_conviction(pc.new_value.try_into().unwrap());
-            self.emit(ChangeExecuted {
-                target,
-                param_key: PARAM_MAX_VOTES_PER_CONVICTION,
-                new_value: pc.new_value,
-            });
+            self
+                .emit(
+                    ChangeExecuted {
+                        target, param_key: PARAM_MAX_VOTES_PER_CONVICTION, new_value: pc.new_value,
+                    },
+                );
             self.reentrancyguard.end();
         }
 
@@ -1242,22 +1253,22 @@ pub mod AdminTimelock {
                 .pending_changes
                 .entry((self.governance.read(), PARAM_PROPOSAL_VOTING_PERIOD))
                 .write(PendingChange { new_value: period.into(), effective_at, exists: true });
-            self.emit(ChangeProposed {
-                target: self.governance.read(),
-                param_key: PARAM_PROPOSAL_VOTING_PERIOD,
-                new_value: period.into(),
-                effective_at,
-            });
+            self
+                .emit(
+                    ChangeProposed {
+                        target: self.governance.read(),
+                        param_key: PARAM_PROPOSAL_VOTING_PERIOD,
+                        new_value: period.into(),
+                        effective_at,
+                    },
+                );
         }
 
         fn execute_set_proposal_voting_period(ref self: ContractState) {
             self.reentrancyguard.start();
             self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
             let target = self.governance.read();
-            let pc = self
-                .pending_changes
-                .entry((target, PARAM_PROPOSAL_VOTING_PERIOD))
-                .read();
+            let pc = self.pending_changes.entry((target, PARAM_PROPOSAL_VOTING_PERIOD)).read();
             assert(pc.exists, 'NoPendingChange');
             assert(get_block_timestamp() >= pc.effective_at, 'TimelockNotElapsed');
             self
@@ -1266,11 +1277,12 @@ pub mod AdminTimelock {
                 .write(PendingChange { new_value: 0, effective_at: 0, exists: false });
             IGovernanceDispatcher { contract_address: target }
                 .execute_set_proposal_voting_period(pc.new_value.try_into().unwrap());
-            self.emit(ChangeExecuted {
-                target,
-                param_key: PARAM_PROPOSAL_VOTING_PERIOD,
-                new_value: pc.new_value,
-            });
+            self
+                .emit(
+                    ChangeExecuted {
+                        target, param_key: PARAM_PROPOSAL_VOTING_PERIOD, new_value: pc.new_value,
+                    },
+                );
             self.reentrancyguard.end();
         }
 
@@ -1292,12 +1304,15 @@ pub mod AdminTimelock {
                 .pending_protected
                 .entry(target)
                 .write(PendingProtectedChange { new_value: protected, effective_at, exists: true });
-            self.emit(ProtectedAddressProposed { account: target, new_value: protected, effective_at });
+            self
+                .emit(
+                    ProtectedAddressProposed {
+                        account: target, new_value: protected, effective_at,
+                    },
+                );
         }
 
-        fn execute_set_protected_address(
-            ref self: ContractState, target_address: ContractAddress,
-        ) {
+        fn execute_set_protected_address(ref self: ContractState, target_address: ContractAddress) {
             self.reentrancyguard.start();
             self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
             let pc = self.pending_protected.entry(target_address).read();
@@ -1351,9 +1366,7 @@ pub mod AdminTimelock {
 
         fn propose_remove_admin(ref self: ContractState, admin_to_remove: ContractAddress) {
             self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
-            assert(
-                self.accesscontrol.has_role(DEFAULT_ADMIN_ROLE, admin_to_remove), 'NotAnAdmin',
-            );
+            assert(self.accesscontrol.has_role(DEFAULT_ADMIN_ROLE, admin_to_remove), 'NotAnAdmin');
             let effective_at = get_block_timestamp() + TIMELOCK_DURATION;
             self
                 .pending_admin_changes
@@ -1368,9 +1381,7 @@ pub mod AdminTimelock {
             assert(pc.exists, 'NoPendingChange');
             assert(!pc.is_add, 'NotARemoveProposal');
             assert(get_block_timestamp() >= pc.effective_at, 'TimelockNotElapsed');
-            assert(
-                self.accesscontrol.has_role(DEFAULT_ADMIN_ROLE, admin_to_remove), 'NotAnAdmin',
-            );
+            assert(self.accesscontrol.has_role(DEFAULT_ADMIN_ROLE, admin_to_remove), 'NotAnAdmin');
             let count = self.admin_count.read();
             assert(count > 1, 'CannotRemoveLastAdmin');
             self

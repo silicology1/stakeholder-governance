@@ -23,15 +23,11 @@ pub trait ISelection<TContractState> {
     fn request_evaluation(ref self: TContractState, evidence: ByteArray) -> u256;
 
     /// Apply a stake ID to an evaluation during the applying phase.
-    fn apply_to_evaluation(
-        ref self: TContractState, evaluation_id: u256, stake_id: u256,
-    );
+    fn apply_to_evaluation(ref self: TContractState, evaluation_id: u256, stake_id: u256);
 
     /// Remove a stake ID from an evaluation (applying phase only, or after
     /// commit if the juror was not drawn).
-    fn remove_from_evaluation(
-        ref self: TContractState, evaluation_id: u256, stake_id: u256,
-    );
+    fn remove_from_evaluation(ref self: TContractState, evaluation_id: u256, stake_id: u256);
 
     /// Advance an evaluation's phase when conditions are met (called by anyone).
     fn advance_evaluation(ref self: TContractState, evaluation_id: u256);
@@ -46,17 +42,11 @@ pub trait ISelection<TContractState> {
 
     /// Reveal a committed score for a drawn stake ID.
     fn reveal_vote(
-        ref self: TContractState,
-        evaluation_id: u256,
-        stake_id: u256,
-        score: i8,
-        salt: felt252,
+        ref self: TContractState, evaluation_id: u256, stake_id: u256, score: i8, salt: felt252,
     );
 
     /// Slash a non-revealing drawn stake ID.
-    fn slash_non_revealer(
-        ref self: TContractState, evaluation_id: u256, stake_id: u256,
-    );
+    fn slash_non_revealer(ref self: TContractState, evaluation_id: u256, stake_id: u256);
 
     /// Finalize an evaluation: compute score, slash incoherent jurors,
     /// distribute rewards, settle bond.
@@ -95,9 +85,7 @@ pub trait ISelection<TContractState> {
     fn get_dispute(self: @TContractState, dispute_id: u256) -> Dispute;
     fn get_dispute_evidence(self: @TContractState, dispute_id: u256) -> ByteArray;
     fn get_evaluation(self: @TContractState, evaluation_id: u256) -> Evaluation;
-    fn get_evaluation_evidence(
-        self: @TContractState, evaluation_id: u256,
-    ) -> ByteArray;
+    fn get_evaluation_evidence(self: @TContractState, evaluation_id: u256) -> ByteArray;
     fn get_stake(self: @TContractState, stake_id: u256) -> Stake;
     fn get_juror_stake(self: @TContractState, juror: ContractAddress) -> u256;
     fn get_juror_stake_ids(self: @TContractState, juror: ContractAddress) -> Array<u256>;
@@ -105,20 +93,14 @@ pub trait ISelection<TContractState> {
     fn get_stake_evaluation_count(self: @TContractState, stake_id: u256) -> u32;
     fn get_juror_locked_stake(self: @TContractState, juror: ContractAddress) -> u256;
     fn get_juror_unlocked_stake(self: @TContractState, juror: ContractAddress) -> u256;
-    fn get_juror_open_evaluation_count(
-        self: @TContractState, juror: ContractAddress,
-    ) -> u32;
+    fn get_juror_open_evaluation_count(self: @TContractState, juror: ContractAddress) -> u32;
     fn get_evaluation_bond_amount(self: @TContractState) -> u256;
     fn get_active_evaluation_for_candidate(
         self: @TContractState, candidate: ContractAddress,
     ) -> u256;
     fn get_evaluation_cooldown(self: @TContractState) -> u64;
-    fn get_last_evaluation_finalized(
-        self: @TContractState, candidate: ContractAddress,
-    ) -> u64;
-    fn get_stake_slashed_total(
-        self: @TContractState, stake_id: u256, evaluation_id: u256,
-    ) -> u256;
+    fn get_last_evaluation_finalized(self: @TContractState, candidate: ContractAddress) -> u64;
+    fn get_stake_slashed_total(self: @TContractState, stake_id: u256, evaluation_id: u256) -> u256;
 
     // ---- parameter views ----
 

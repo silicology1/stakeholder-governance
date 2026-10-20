@@ -3,13 +3,13 @@
 //! `dispute` (Kleros-side), `governance` (proposals/convictions), and
 //! `admin` (timelocked pending changes).
 
+/// Re-export the timelock and upgrade pending-change records.
+mod admin;
 /// Re-export the dispute-side storage records.
 mod dispute;
 /// Re-export the governance-side storage records.
 mod governance;
-/// Re-export the timelock and upgrade pending-change records.
-mod admin;
+pub use admin::{PendingAdminChange, PendingChange, PendingProtectedChange, PendingUpgrade};
 
-pub use dispute::{Dispute, Grant, Stake, Evaluation};
+pub use dispute::{Dispute, Evaluation, Grant, Stake};
 pub use governance::{Conviction, FundingProposal};
-pub use admin::{PendingChange, PendingProtectedChange, PendingUpgrade, PendingAdminChange};

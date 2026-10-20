@@ -20,20 +20,17 @@
 
 #[starknet::contract]
 pub mod ConvictionToken {
-    use starknet::{
-        ContractAddress, ClassHash, get_caller_address, get_block_timestamp,
-        get_contract_address,
-    };
+    use core::num::traits::Zero;
+    use openzeppelin_introspection::src5::SRC5Component;
+    use openzeppelin_security::reentrancyguard::ReentrancyGuardComponent;
+    use openzeppelin_token::erc20::{DefaultConfig, ERC20Component, ERC20HooksEmptyImpl};
+    use openzeppelin_upgrades::upgradeable::UpgradeableComponent;
     use starknet::storage::{
         Map, StoragePathEntry, StoragePointerReadAccess, StoragePointerWriteAccess,
     };
-    use core::num::traits::Zero;
-
-    use openzeppelin_token::erc20::{ERC20Component, ERC20HooksEmptyImpl, DefaultConfig};
-    use openzeppelin_introspection::src5::SRC5Component;
-    use openzeppelin_security::reentrancyguard::ReentrancyGuardComponent;
-    use openzeppelin_upgrades::upgradeable::UpgradeableComponent;
-
+    use starknet::{
+        ClassHash, ContractAddress, get_block_timestamp, get_caller_address, get_contract_address,
+    };
     use crate::constants::*;
     use crate::events::*;
     use crate::interfaces::iconviction_token::IConvictionToken;
@@ -42,7 +39,7 @@ pub mod ConvictionToken {
     component!(path: ERC20Component, storage: erc20, event: ERC20Event);
     component!(path: SRC5Component, storage: src5, event: SRC5Event);
     component!(
-        path: ReentrancyGuardComponent, storage: reentrancyguard, event: ReentrancyGuardEvent
+        path: ReentrancyGuardComponent, storage: reentrancyguard, event: ReentrancyGuardEvent,
     );
     component!(path: UpgradeableComponent, storage: upgradeable, event: UpgradeableEvent);
 
@@ -72,7 +69,6 @@ pub mod ConvictionToken {
         /// Upgradeable implementation state.
         #[substorage(v0)]
         upgradeable: UpgradeableComponent::Storage,
-
         /// Module admin authority (the `AdminTimelock` contract).
         admin: ContractAddress,
         /// Authorized selection module allowed to escrow / release / mint.
@@ -81,7 +77,6 @@ pub mod ConvictionToken {
         governance: ContractAddress,
         /// Whether the class-hash upgrade path is permanently disabled.
         upgrades_disabled: bool,
-
         // ---- ERC20 balance decay ----
         /// Hourly ERC20 balance-decay rate in basis points.
         decay_rate_bps: u16,
@@ -95,7 +90,6 @@ pub mod ConvictionToken {
         last_caller_reward_at: Map<ContractAddress, u64>,
         /// Addresses excluded from decay.
         is_protected: Map<ContractAddress, bool>,
-
         // ---- monthly inflation / burn-recycling budget ----
         /// Monthly inflation rate in basis points.
         inflation_rate_bps: u16,
@@ -122,7 +116,6 @@ pub mod ConvictionToken {
         ReentrancyGuardEvent: ReentrancyGuardComponent::Event,
         #[flat]
         UpgradeableEvent: UpgradeableComponent::Event,
-
         AdminChanged: AdminChanged,
         ModulesSet: ModulesSet,
         ProtectedAddressSet: ProtectedAddressSet,
@@ -200,7 +193,7 @@ pub mod ConvictionToken {
                     self._apply_decay(user);
                 }
                 i += 1;
-            };
+            }
             self.reentrancyguard.end();
         }
 
@@ -227,9 +220,7 @@ pub mod ConvictionToken {
             }
         }
 
-        fn mint_from_budget(
-            ref self: ContractState, to: ContractAddress, amount: u256,
-        ) -> bool {
+        fn mint_from_budget(ref self: ContractState, to: ContractAddress, amount: u256) -> bool {
             self._assert_module();
             self._mint_from_budget(to, amount)
         }
@@ -252,9 +243,7 @@ pub mod ConvictionToken {
             self.emit(ModulesSet { selection, governance });
         }
 
-        fn set_protected(
-            ref self: ContractState, target: ContractAddress, protected: bool,
-        ) {
+        fn set_protected(ref self: ContractState, target: ContractAddress, protected: bool) {
             self._assert_admin();
             assert(target.is_non_zero(), 'ZeroAddress');
             self.is_protected.entry(target).write(protected);
@@ -393,8 +382,7 @@ pub mod ConvictionToken {
         fn _assert_module(self: @ContractState) {
             let caller = get_caller_address();
             assert(
-                caller == self.selection.read() || caller == self.governance.read(),
-                'NotModule',
+                caller == self.selection.read() || caller == self.governance.read(), 'NotModule',
             );
         }
 
@@ -476,7 +464,7 @@ pub mod ConvictionToken {
                     );
 
                 i += 1;
-            };
+            }
 
             self.month_index.write(idx);
             self.month_start.write(start);
@@ -484,9 +472,7 @@ pub mod ConvictionToken {
 
         /// Attempts to mint a reward from the current month's budget,
         /// best-effort (never reverts the enclosing operation).
-        fn _mint_from_budget(
-            ref self: ContractState, to: ContractAddress, amount: u256,
-        ) -> bool {
+        fn _mint_from_budget(ref self: ContractState, to: ContractAddress, amount: u256) -> bool {
             if amount == 0 {
                 return false;
             }

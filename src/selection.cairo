@@ -10,41 +10,38 @@
 
 #[starknet::contract]
 pub mod Selection {
+    use cartridge_vrf::Source;
+    use cartridge_vrf::vrf_consumer::vrf_consumer_component::VrfConsumerComponent;
     use core::array::ArrayTrait;
     use core::num::traits::Zero;
     use core::poseidon::poseidon_hash_span;
-    use starknet::{
-        ContractAddress, ClassHash, get_caller_address, get_block_timestamp, get_block_number,
-        get_contract_address,
-    };
-    use starknet::syscalls::get_block_hash_syscall;
-    use starknet::storage::{
-        Map, StoragePathEntry, StoragePointerReadAccess, StoragePointerWriteAccess,
-    };
-
     use openzeppelin_introspection::src5::SRC5Component;
     use openzeppelin_security::reentrancyguard::ReentrancyGuardComponent;
     use openzeppelin_upgrades::upgradeable::UpgradeableComponent;
-
-    use cartridge_vrf::Source;
-    use cartridge_vrf::vrf_consumer::vrf_consumer_component::VrfConsumerComponent;
-
+    use starknet::storage::{
+        Map, StoragePathEntry, StoragePointerReadAccess, StoragePointerWriteAccess,
+    };
+    use starknet::syscalls::get_block_hash_syscall;
+    use starknet::{
+        ClassHash, ContractAddress, get_block_number, get_block_timestamp, get_caller_address,
+        get_contract_address,
+    };
     use crate::constants::*;
     use crate::events::*;
-    use crate::types::*;
-    use crate::utils::{
-        derive_draw_random, governance_tokens_for_score, isqrt, lowbit, round_scaled, score_to_i64,
-    };
-    use crate::interfaces::iselection::ISelection;
-    use crate::interfaces::iupgradeable_module::IUpgradeableModule;
     use crate::interfaces::iconviction_token::{
         IConvictionTokenDispatcher, IConvictionTokenDispatcherTrait,
     };
     use crate::interfaces::igovernance::{IGovernanceDispatcher, IGovernanceDispatcherTrait};
+    use crate::interfaces::iselection::ISelection;
+    use crate::interfaces::iupgradeable_module::IUpgradeableModule;
+    use crate::types::*;
+    use crate::utils::{
+        derive_draw_random, governance_tokens_for_score, isqrt, lowbit, round_scaled, score_to_i64,
+    };
 
     component!(path: SRC5Component, storage: src5, event: SRC5Event);
     component!(
-        path: ReentrancyGuardComponent, storage: reentrancyguard, event: ReentrancyGuardEvent
+        path: ReentrancyGuardComponent, storage: reentrancyguard, event: ReentrancyGuardEvent,
     );
     component!(path: UpgradeableComponent, storage: upgradeable, event: UpgradeableEvent);
     component!(path: VrfConsumerComponent, storage: vrf_consumer, event: VrfConsumerEvent);
@@ -69,12 +66,10 @@ pub mod Selection {
         upgradeable: UpgradeableComponent::Storage,
         #[substorage(v0)]
         vrf_consumer: VrfConsumerComponent::Storage,
-
         admin: ContractAddress,
         token: ContractAddress,
         governance: ContractAddress,
         upgrades_disabled: bool,
-
         commit_duration: u64,
         reveal_duration: u64,
         non_reveal_slash_bps: u16,
@@ -82,21 +77,18 @@ pub mod Selection {
         coherence_band: u8,
         evaluation_bond_amount: u256,
         evaluation_cooldown: u64,
-
         applying_duration: u64,
         min_stake_ids_per_evaluation: u32,
         min_jurors_per_evaluation: u32,
         max_evaluations_per_stake: u32,
         juror_reward_amount: u256,
         drawing_duration: u64,
-
         stake_count: u256,
         stakes: Map<u256, Stake>,
         juror_stake_ids: Map<(ContractAddress, u32), u256>,
         juror_stake_count: Map<ContractAddress, u32>,
         stake_evaluation_count: Map<u256, u32>,
         stake_applied_to_eval: Map<(u256, u256), bool>,
-
         evaluation_count: u256,
         evaluations: Map<u256, Evaluation>,
         evaluation_fenwick: Map<(u256, u32), u256>,
@@ -105,11 +97,9 @@ pub mod Selection {
         evaluation_next_index: Map<u256, u32>,
         evaluation_applied_stakes: Map<(u256, u32), u256>,
         evaluation_applied_count: Map<u256, u32>,
-
         evaluation_drawn_stakes: Map<(u256, u32), u256>,
         evaluation_drawn_count: Map<u256, u32>,
         evaluation_draw_index: Map<u256, u32>,
-
         evaluation_commit: Map<(u256, u256), felt252>,
         evaluation_committed: Map<(u256, u256), bool>,
         evaluation_revealed: Map<(u256, u256), bool>,
@@ -118,9 +108,7 @@ pub mod Selection {
         evaluation_slashed: Map<(u256, u256), bool>,
         evaluation_reward_claimed: Map<(u256, u256), bool>,
         evaluation_juror_reward: Map<(u256, u256), u256>,
-
         stake_slashed_total: Map<(u256, u256), u256>,
-
         evaluation_evidence: Map<u256, ByteArray>,
         has_active_evaluation: Map<ContractAddress, bool>,
         active_evaluation_for_candidate: Map<ContractAddress, u256>,
@@ -138,7 +126,6 @@ pub mod Selection {
         UpgradeableEvent: UpgradeableComponent::Event,
         #[flat]
         VrfConsumerEvent: VrfConsumerComponent::Event,
-
         AdminChanged: AdminChanged,
         Staked: Staked,
         Unstaked: Unstaked,
@@ -214,10 +201,7 @@ pub mod Selection {
             self.stake_count.write(stake_id + 1);
 
             let stake = Stake {
-                owner: caller,
-                amount,
-                created_at: get_block_timestamp(),
-                retired: false,
+                owner: caller, amount, created_at: get_block_timestamp(), retired: false,
             };
             self.stakes.entry(stake_id).write(stake);
 
@@ -245,12 +229,17 @@ pub mod Selection {
 
             let new_amount = stake.amount - amount;
             let fully_unstaked = new_amount == 0;
-            self.stakes.entry(stake_id).write(Stake {
-                owner: stake.owner,
-                amount: new_amount,
-                created_at: stake.created_at,
-                retired: fully_unstaked || stake.retired,
-            });
+            self
+                .stakes
+                .entry(stake_id)
+                .write(
+                    Stake {
+                        owner: stake.owner,
+                        amount: new_amount,
+                        created_at: stake.created_at,
+                        retired: fully_unstaked || stake.retired,
+                    },
+                );
 
             self._token().release(caller, amount);
 
@@ -266,17 +255,12 @@ pub mod Selection {
             assert(evidence.len() <= MAX_EVIDENCE_LEN, 'EvidenceTooLong');
 
             let candidate = get_caller_address();
-            assert(
-                !self.has_active_evaluation.entry(candidate).read(),
-                'AlreadyUnderEvaluation',
-            );
+            assert(!self.has_active_evaluation.entry(candidate).read(), 'AlreadyUnderEvaluation');
 
             let last_evaluation = self.last_evaluation_finalized.entry(candidate).read();
             if last_evaluation != 0 {
                 let cooldown = self.evaluation_cooldown.read();
-                assert(
-                    get_block_timestamp() >= last_evaluation + cooldown, 'EvaluationCooldown',
-                );
+                assert(get_block_timestamp() >= last_evaluation + cooldown, 'EvaluationCooldown');
             }
 
             let bond_amount = self.evaluation_bond_amount.read();
@@ -317,9 +301,7 @@ pub mod Selection {
             evaluation_id
         }
 
-        fn apply_to_evaluation(
-            ref self: ContractState, evaluation_id: u256, stake_id: u256,
-        ) {
+        fn apply_to_evaluation(ref self: ContractState, evaluation_id: u256, stake_id: u256) {
             self.reentrancyguard.start();
             let caller = get_caller_address();
 
@@ -346,15 +328,9 @@ pub mod Selection {
 
             self._fenwick_add_eval(evaluation_id, fenwick_index, stake.amount);
 
-            self.evaluation_stake_to_index
-                .entry((evaluation_id, stake_id))
-                .write(fenwick_index);
-            self.evaluation_index_to_stake
-                .entry((evaluation_id, fenwick_index))
-                .write(stake_id);
-            self.evaluation_applied_stakes
-                .entry((evaluation_id, e.applied_count))
-                .write(stake_id);
+            self.evaluation_stake_to_index.entry((evaluation_id, stake_id)).write(fenwick_index);
+            self.evaluation_index_to_stake.entry((evaluation_id, fenwick_index)).write(stake_id);
+            self.evaluation_applied_stakes.entry((evaluation_id, e.applied_count)).write(stake_id);
             e.applied_count += 1;
 
             self.stake_applied_to_eval.entry((stake_id, evaluation_id)).write(true);
@@ -362,33 +338,25 @@ pub mod Selection {
             self.stake_evaluation_count.entry(stake_id).write(new_count);
 
             self.evaluations.entry(evaluation_id).write(e);
-            self.evaluation_applied_count
-                .entry(evaluation_id)
-                .write(e.applied_count);
+            self.evaluation_applied_count.entry(evaluation_id).write(e.applied_count);
 
             self.emit(StakeApplied { evaluation_id, stake_id, owner: caller });
 
             self.reentrancyguard.end();
         }
 
-        fn remove_from_evaluation(
-            ref self: ContractState, evaluation_id: u256, stake_id: u256,
-        ) {
+        fn remove_from_evaluation(ref self: ContractState, evaluation_id: u256, stake_id: u256) {
             self.reentrancyguard.start();
             let caller = get_caller_address();
 
             let mut e = self.evaluations.entry(evaluation_id).read();
-            assert(
-                e.phase == PHASE_APPLYING || e.phase == PHASE_COMMIT,
-                'WrongPhaseForRemoval',
-            );
+            assert(e.phase == PHASE_APPLYING || e.phase == PHASE_COMMIT, 'WrongPhaseForRemoval');
 
             let stake = self.stakes.entry(stake_id).read();
             assert(stake.owner == caller, 'NotStakeOwner');
 
             assert(
-                self.stake_applied_to_eval.entry((stake_id, evaluation_id)).read(),
-                'NotApplied',
+                self.stake_applied_to_eval.entry((stake_id, evaluation_id)).read(), 'NotApplied',
             );
 
             if e.phase == PHASE_COMMIT {
@@ -399,16 +367,13 @@ pub mod Selection {
                     if i >= drawn_count {
                         break;
                     }
-                    let drawn_id = self
-                        .evaluation_drawn_stakes
-                        .entry((evaluation_id, i))
-                        .read();
+                    let drawn_id = self.evaluation_drawn_stakes.entry((evaluation_id, i)).read();
                     if drawn_id == stake_id {
                         is_drawn = true;
                         break;
                     }
                     i += 1;
-                };
+                }
                 assert(!is_drawn, 'StakeDrawn');
             }
 
@@ -418,12 +383,8 @@ pub mod Selection {
                 .read();
             if fenwick_index != 0 {
                 self._fenwick_sub_eval(evaluation_id, fenwick_index, stake.amount);
-                self.evaluation_stake_to_index
-                    .entry((evaluation_id, stake_id))
-                    .write(0);
-                self.evaluation_index_to_stake
-                    .entry((evaluation_id, fenwick_index))
-                    .write(0);
+                self.evaluation_stake_to_index.entry((evaluation_id, stake_id)).write(0);
+                self.evaluation_index_to_stake.entry((evaluation_id, fenwick_index)).write(0);
             }
 
             let applied_count = e.applied_count;
@@ -433,10 +394,7 @@ pub mod Selection {
                 if i >= applied_count {
                     break;
                 }
-                let sid = self
-                    .evaluation_applied_stakes
-                    .entry((evaluation_id, i))
-                    .read();
+                let sid = self.evaluation_applied_stakes.entry((evaluation_id, i)).read();
                 if sid == stake_id {
                     found = true;
                     let last_idx = applied_count - 1;
@@ -445,24 +403,18 @@ pub mod Selection {
                             .evaluation_applied_stakes
                             .entry((evaluation_id, last_idx))
                             .read();
-                        self.evaluation_applied_stakes
-                            .entry((evaluation_id, i))
-                            .write(last_sid);
+                        self.evaluation_applied_stakes.entry((evaluation_id, i)).write(last_sid);
                     }
-                    self.evaluation_applied_stakes
-                        .entry((evaluation_id, last_idx))
-                        .write(0);
+                    self.evaluation_applied_stakes.entry((evaluation_id, last_idx)).write(0);
                     break;
                 }
                 i += 1;
-            };
+            }
             assert(found, 'StakeNotInAppliedList');
 
             e.applied_count = applied_count - 1;
             self.evaluations.entry(evaluation_id).write(e);
-            self.evaluation_applied_count
-                .entry(evaluation_id)
-                .write(e.applied_count);
+            self.evaluation_applied_count.entry(evaluation_id).write(e.applied_count);
 
             self.stake_applied_to_eval.entry((stake_id, evaluation_id)).write(false);
             let current_count = self.stake_evaluation_count.entry(stake_id).read();
@@ -509,28 +461,22 @@ pub mod Selection {
                 } else {
                     e.phase = PHASE_DISMISSED;
                     self.evaluations.entry(evaluation_id).write(e);
-                    self.emit(EvaluationDismissed {
-                        evaluation_id,
-                        candidate: e.candidate,
-                    });
+                    self.emit(EvaluationDismissed { evaluation_id, candidate: e.candidate });
 
                     self._release_all_applied_stakes(evaluation_id);
 
                     if e.bond_amount > 0 && e.requester.is_non_zero() {
                         self._token().release(e.requester, e.bond_amount);
-                        self.emit(BondRefunded {
-                            evaluation_id,
-                            requester: e.requester,
-                            amount: e.bond_amount,
-                        });
+                        self
+                            .emit(
+                                BondRefunded {
+                                    evaluation_id, requester: e.requester, amount: e.bond_amount,
+                                },
+                            );
                     }
                     self.has_active_evaluation.entry(e.requester).write(false);
-                    self.active_evaluation_for_candidate
-                        .entry(e.requester)
-                        .write(0);
-                    self.last_evaluation_finalized
-                        .entry(e.requester)
-                        .write(now);
+                    self.active_evaluation_for_candidate.entry(e.requester).write(0);
+                    self.last_evaluation_finalized.entry(e.requester).write(now);
                 }
             } else if e.phase == PHASE_COMMIT {
                 if now < e.commit_deadline {
@@ -585,10 +531,7 @@ pub mod Selection {
                 let target = rand_u256 % total_weight;
 
                 let index = self._fenwick_find_eval(evaluation_id, target);
-                let stake_id = self
-                    .evaluation_index_to_stake
-                    .entry((evaluation_id, index))
-                    .read();
+                let stake_id = self.evaluation_index_to_stake.entry((evaluation_id, index)).read();
 
                 if stake_id == 0 {
                     draw_idx += 1;
@@ -599,24 +542,18 @@ pub mod Selection {
                 let owner = stake.owner;
 
                 self._fenwick_sub_eval(evaluation_id, index, stake.amount);
-                self.evaluation_stake_to_index
-                    .entry((evaluation_id, stake_id))
-                    .write(0);
-                self.evaluation_index_to_stake
-                    .entry((evaluation_id, index))
-                    .write(0);
+                self.evaluation_stake_to_index.entry((evaluation_id, stake_id)).write(0);
+                self.evaluation_index_to_stake.entry((evaluation_id, index)).write(0);
 
                 self.evaluation_drawn_stakes.entry((evaluation_id, drawn)).write(stake_id);
                 drawn += 1;
 
-                self.emit(JurorDrawn {
-                    evaluation_id,
-                    stake_id,
-                    juror: owner,
-                    draw_index: draw_idx,
-                });
+                self
+                    .emit(
+                        JurorDrawn { evaluation_id, stake_id, juror: owner, draw_index: draw_idx },
+                    );
                 draw_idx += 1;
-            };
+            }
 
             e.drawn_count = drawn;
             self.evaluations.entry(evaluation_id).write(e);
@@ -644,10 +581,7 @@ pub mod Selection {
 
             let stake = self.stakes.entry(stake_id).read();
             assert(stake.owner == caller, 'NotStakeOwner');
-            assert(
-                self._is_stake_drawn(evaluation_id, stake_id),
-                'NotDrawnStake',
-            );
+            assert(self._is_stake_drawn(evaluation_id, stake_id), 'NotDrawnStake');
             assert(
                 !self.evaluation_committed.entry((evaluation_id, stake_id)).read(),
                 'AlreadyCommitted',
@@ -661,11 +595,7 @@ pub mod Selection {
         }
 
         fn reveal_vote(
-            ref self: ContractState,
-            evaluation_id: u256,
-            stake_id: u256,
-            score: i8,
-            salt: felt252,
+            ref self: ContractState, evaluation_id: u256, stake_id: u256, score: i8, salt: felt252,
         ) {
             self.reentrancyguard.start();
             let caller = get_caller_address();
@@ -681,14 +611,8 @@ pub mod Selection {
 
             let stake = self.stakes.entry(stake_id).read();
             assert(stake.owner == caller, 'NotStakeOwner');
-            assert(
-                self._is_stake_drawn(evaluation_id, stake_id),
-                'NotDrawnStake',
-            );
-            assert(
-                self.evaluation_committed.entry((evaluation_id, stake_id)).read(),
-                'NoCommit',
-            );
+            assert(self._is_stake_drawn(evaluation_id, stake_id), 'NotDrawnStake');
+            assert(self.evaluation_committed.entry((evaluation_id, stake_id)).read(), 'NoCommit');
             assert(
                 !self.evaluation_revealed.entry((evaluation_id, stake_id)).read(),
                 'AlreadyRevealed',
@@ -708,24 +632,15 @@ pub mod Selection {
             self.reentrancyguard.end();
         }
 
-        fn slash_non_revealer(
-            ref self: ContractState, evaluation_id: u256, stake_id: u256,
-        ) {
+        fn slash_non_revealer(ref self: ContractState, evaluation_id: u256, stake_id: u256) {
             self.reentrancyguard.start();
             let e = self.evaluations.entry(evaluation_id).read();
             assert(get_block_timestamp() >= e.reveal_deadline, 'RevealStillOpen');
 
+            assert(self._is_stake_drawn(evaluation_id, stake_id), 'NotDrawnStake');
+            assert(!self.evaluation_revealed.entry((evaluation_id, stake_id)).read(), 'DidReveal');
             assert(
-                self._is_stake_drawn(evaluation_id, stake_id),
-                'NotDrawnStake',
-            );
-            assert(
-                !self.evaluation_revealed.entry((evaluation_id, stake_id)).read(),
-                'DidReveal',
-            );
-            assert(
-                !self.evaluation_slashed.entry((evaluation_id, stake_id)).read(),
-                'AlreadySlashed',
+                !self.evaluation_slashed.entry((evaluation_id, stake_id)).read(), 'AlreadySlashed',
             );
 
             let stake = self.stakes.entry(stake_id).read();
@@ -740,9 +655,7 @@ pub mod Selection {
                 dm.slash_pool += slash_amount;
                 self.evaluations.entry(evaluation_id).write(dm);
 
-                self.stake_slashed_total
-                    .entry((stake_id, evaluation_id))
-                    .write(slash_amount);
+                self.stake_slashed_total.entry((stake_id, evaluation_id)).write(slash_amount);
             }
 
             self.evaluation_slashed.entry((evaluation_id, stake_id)).write(true);
@@ -753,12 +666,12 @@ pub mod Selection {
             if caller != owner
                 && SLASH_KEEPER_REWARD > 0
                 && self._token().mint_from_budget(caller, SLASH_KEEPER_REWARD) {
-                self.emit(SlashKeeperRewarded {
-                    caller,
-                    juror: owner,
-                    evaluation_id,
-                    reward: SLASH_KEEPER_REWARD,
-                });
+                self
+                    .emit(
+                        SlashKeeperRewarded {
+                            caller, juror: owner, evaluation_id, reward: SLASH_KEEPER_REWARD,
+                        },
+                    );
             }
 
             self.reentrancyguard.end();
@@ -788,7 +701,7 @@ pub mod Selection {
                     total_weight += 1;
                 }
                 i += 1;
-            };
+            }
 
             if total_weight == 0 {
                 e.final_score = 0;
@@ -805,24 +718,17 @@ pub mod Selection {
                 if requester.is_non_zero() {
                     self.has_active_evaluation.entry(requester).write(false);
                     self.active_evaluation_for_candidate.entry(requester).write(0);
-                    self.last_evaluation_finalized
-                        .entry(requester)
-                        .write(get_block_timestamp());
+                    self.last_evaluation_finalized.entry(requester).write(get_block_timestamp());
                 }
                 if bond_to_refund > 0 {
                     self._token().release(requester, bond_to_refund);
-                    self.emit(BondRefunded {
-                        evaluation_id,
-                        requester,
-                        amount: bond_to_refund,
-                    });
+                    self.emit(BondRefunded { evaluation_id, requester, amount: bond_to_refund });
                 }
 
-                self.emit(DisputeFinalized {
-                    evaluation_id,
-                    candidate: e.candidate,
-                    final_score: 0,
-                });
+                self
+                    .emit(
+                        DisputeFinalized { evaluation_id, candidate: e.candidate, final_score: 0 },
+                    );
                 self.reentrancyguard.end();
                 return;
             }
@@ -846,7 +752,7 @@ pub mod Selection {
                     sum_sq += diff_sq_u64;
                 }
                 i += 1;
-            };
+            }
             let variance_scaled: u64 = sum_sq / total_weight.try_into().unwrap_or(1);
             let stdev_scaled_u256: u256 = isqrt(variance_scaled.try_into().unwrap_or(0));
             let stdev_scaled: u64 = stdev_scaled_u256.try_into().unwrap_or(0);
@@ -863,7 +769,11 @@ pub mod Selection {
                     let score = self.evaluation_score.entry((evaluation_id, stake_id)).read();
                     let score_i64 = score_to_i64(score);
                     let diff = score_i64 * SCALE - mean_scaled;
-                    let abs_diff = if diff < 0 { -diff } else { diff };
+                    let abs_diff = if diff < 0 {
+                        -diff
+                    } else {
+                        diff
+                    };
                     let stdev_scaled_i64: i64 = stdev_scaled.try_into().unwrap_or(0);
                     if abs_diff <= stdev_scaled_i64 {
                         sum_filtered += score_i64 * SCALE;
@@ -871,7 +781,7 @@ pub mod Selection {
                     }
                 }
                 i += 1;
-            };
+            }
 
             let final_mean_scaled: i64 = if filtered_weight > 0 {
                 let fw_i64: i64 = filtered_weight.try_into().unwrap_or(0);
@@ -906,7 +816,7 @@ pub mod Selection {
                     }
                 }
                 i += 1;
-            };
+            }
 
             let incoherence_bps: u256 = self.incoherence_slash_bps.read().try_into().unwrap_or(0);
             i = 0;
@@ -928,19 +838,21 @@ pub mod Selection {
                         if slash_amount > 0 {
                             self._apply_stake_slash(stake_id, slash_amount);
                             e.slash_pool += slash_amount;
-                            self.stake_slashed_total
+                            self
+                                .stake_slashed_total
                                 .entry((stake_id, evaluation_id))
                                 .write(slash_amount);
-                            self.emit(IncoherentJurorSlashed {
-                                evaluation_id,
-                                juror: stake.owner,
-                                amount: slash_amount,
-                            });
+                            self
+                                .emit(
+                                    IncoherentJurorSlashed {
+                                        evaluation_id, juror: stake.owner, amount: slash_amount,
+                                    },
+                                );
                         }
                     }
                 }
                 i += 1;
-            };
+            }
 
             let juror_reward_amount = self.juror_reward_amount.read();
             let total_coherent = total_coherent_weight;
@@ -961,9 +873,7 @@ pub mod Selection {
                         } else {
                             e.slash_pool / tc_u256
                         };
-                        self.evaluation_juror_reward
-                            .entry((evaluation_id, stake_id))
-                            .write(share);
+                        self.evaluation_juror_reward.entry((evaluation_id, stake_id)).write(share);
                     }
                     i += 1;
                 };
@@ -971,10 +881,8 @@ pub mod Selection {
 
             let mint_amount = governance_tokens_for_score(final_score);
             if mint_amount > 0 {
-                IGovernanceDispatcher {
-                    contract_address: self.governance.read(),
-                }
-                .mint_governance_tokens(e.candidate, mint_amount);
+                IGovernanceDispatcher { contract_address: self.governance.read() }
+                    .mint_governance_tokens(e.candidate, mint_amount);
                 e.governance_tokens_minted = mint_amount;
             }
 
@@ -989,38 +897,24 @@ pub mod Selection {
 
             if requester.is_non_zero() {
                 self.has_active_evaluation.entry(requester).write(false);
-                self.last_evaluation_finalized
-                    .entry(requester)
-                    .write(get_block_timestamp());
+                self.last_evaluation_finalized.entry(requester).write(get_block_timestamp());
             }
 
             self.evaluations.entry(evaluation_id).write(e);
-            self.emit(DisputeFinalized {
-                evaluation_id,
-                candidate: e.candidate,
-                final_score,
-            });
+            self.emit(DisputeFinalized { evaluation_id, candidate: e.candidate, final_score });
             if mint_amount > 0 {
-                self.emit(GovernanceTokensMinted {
-                    evaluation_id,
-                    candidate: e.candidate,
-                    amount: mint_amount,
-                    final_score,
-                });
+                self
+                    .emit(
+                        GovernanceTokensMinted {
+                            evaluation_id, candidate: e.candidate, amount: mint_amount, final_score,
+                        },
+                    );
             }
             if refund_bond {
                 self._token().release(requester, bond_amount);
-                self.emit(BondRefunded {
-                    evaluation_id,
-                    requester,
-                    amount: bond_amount,
-                });
+                self.emit(BondRefunded { evaluation_id, requester, amount: bond_amount });
             } else if slash_bond {
-                self.emit(BondSlashed {
-                    evaluation_id,
-                    requester,
-                    amount: bond_amount,
-                });
+                self.emit(BondSlashed { evaluation_id, requester, amount: bond_amount });
             }
 
             self._finalize_cleanup(evaluation_id);
@@ -1028,17 +922,12 @@ pub mod Selection {
             self.reentrancyguard.end();
         }
 
-        fn claim_juror_reward(
-            ref self: ContractState, evaluation_id: u256, stake_id: u256,
-        ) {
+        fn claim_juror_reward(ref self: ContractState, evaluation_id: u256, stake_id: u256) {
             self.reentrancyguard.start();
             let caller = get_caller_address();
             let e = self.evaluations.entry(evaluation_id).read();
             assert(e.final_score_set, 'NotFinalized');
-            assert(
-                self.evaluation_coherent.entry((evaluation_id, stake_id)).read(),
-                'NotCoherent',
-            );
+            assert(self.evaluation_coherent.entry((evaluation_id, stake_id)).read(), 'NotCoherent');
             assert(
                 !self.evaluation_reward_claimed.entry((evaluation_id, stake_id)).read(),
                 'AlreadyClaimed',
@@ -1053,19 +942,14 @@ pub mod Selection {
                 let from_budget = e.slash_pool == 0;
                 if from_budget {
                     if self._token().mint_from_budget(caller, reward) {
-                        self.emit(JurorRewardClaimed {
-                            evaluation_id,
-                            juror: caller,
-                            amount: reward,
-                        });
+                        self
+                            .emit(
+                                JurorRewardClaimed { evaluation_id, juror: caller, amount: reward },
+                            );
                     }
                 } else {
                     self._token().release(caller, reward);
-                    self.emit(JurorRewardClaimed {
-                        evaluation_id,
-                        juror: caller,
-                        amount: reward,
-                    });
+                    self.emit(JurorRewardClaimed { evaluation_id, juror: caller, amount: reward });
                 }
             }
 
@@ -1087,11 +971,7 @@ pub mod Selection {
 
             if bond_amount > 0 {
                 self._token().release(caller, bond_amount);
-                self.emit(BondRefunded {
-                    evaluation_id,
-                    requester: caller,
-                    amount: bond_amount,
-                });
+                self.emit(BondRefunded { evaluation_id, requester: caller, amount: bond_amount });
             }
 
             self.reentrancyguard.end();
@@ -1213,9 +1093,7 @@ pub mod Selection {
             self.evaluations.entry(evaluation_id).read()
         }
 
-        fn get_evaluation_evidence(
-            self: @ContractState, evaluation_id: u256,
-        ) -> ByteArray {
+        fn get_evaluation_evidence(self: @ContractState, evaluation_id: u256) -> ByteArray {
             let evidence: ByteArray = self.evaluation_evidence.entry(evaluation_id).read();
             evidence
         }
@@ -1236,7 +1114,7 @@ pub mod Selection {
                 let stake = self.stakes.entry(sid).read();
                 total += stake.amount;
                 i += 1;
-            };
+            }
             total
         }
 
@@ -1251,7 +1129,7 @@ pub mod Selection {
                 let sid = self.juror_stake_ids.entry((juror, i)).read();
                 ids.append(sid);
                 i += 1;
-            };
+            }
             ids
         }
 
@@ -1266,7 +1144,7 @@ pub mod Selection {
                 let stake = self.stakes.entry(i).read();
                 total += stake.amount;
                 i += 1;
-            };
+            }
             total
         }
 
@@ -1289,7 +1167,7 @@ pub mod Selection {
                     total += stake.amount;
                 }
                 i += 1;
-            };
+            }
             total
         }
 
@@ -1303,9 +1181,7 @@ pub mod Selection {
             }
         }
 
-        fn get_juror_open_evaluation_count(
-            self: @ContractState, juror: ContractAddress,
-        ) -> u32 {
+        fn get_juror_open_evaluation_count(self: @ContractState, juror: ContractAddress) -> u32 {
             let count = self.juror_stake_count.entry(juror).read();
             let mut count_val: u32 = 0;
             let mut i: u32 = 0;
@@ -1316,7 +1192,7 @@ pub mod Selection {
                 let sid = self.juror_stake_ids.entry((juror, i)).read();
                 count_val += self.stake_evaluation_count.entry(sid).read();
                 i += 1;
-            };
+            }
             count_val
         }
 
@@ -1334,9 +1210,7 @@ pub mod Selection {
             self.evaluation_cooldown.read()
         }
 
-        fn get_last_evaluation_finalized(
-            self: @ContractState, candidate: ContractAddress,
-        ) -> u64 {
+        fn get_last_evaluation_finalized(self: @ContractState, candidate: ContractAddress) -> u64 {
             self.last_evaluation_finalized.entry(candidate).read()
         }
 
@@ -1480,9 +1354,7 @@ pub mod Selection {
             };
         }
 
-        fn _fenwick_prefix_sum_eval(
-            self: @ContractState, evaluation_id: u256, index: u32,
-        ) -> u256 {
+        fn _fenwick_prefix_sum_eval(self: @ContractState, evaluation_id: u256, index: u32) -> u256 {
             let mut sum: u256 = 0;
             let mut i = index;
             loop {
@@ -1491,7 +1363,7 @@ pub mod Selection {
                 }
                 sum += self.evaluation_fenwick.entry((evaluation_id, i)).read();
                 i -= lowbit(i);
-            };
+            }
             sum
         }
 
@@ -1507,7 +1379,7 @@ pub mod Selection {
                     break;
                 }
                 log_size = log_size * 2;
-            };
+            }
 
             let mut pos: u32 = 0;
             let mut remaining = target;
@@ -1525,28 +1397,23 @@ pub mod Selection {
                     }
                 }
                 step = step / 2;
-            };
+            }
             pos + 1
         }
 
-        fn _is_stake_drawn(
-            self: @ContractState, evaluation_id: u256, stake_id: u256,
-        ) -> bool {
+        fn _is_stake_drawn(self: @ContractState, evaluation_id: u256, stake_id: u256) -> bool {
             let drawn_count = self.evaluation_drawn_count.entry(evaluation_id).read();
             let mut i: u32 = 0;
             loop {
                 if i >= drawn_count {
                     break;
                 }
-                let drawn_id = self
-                    .evaluation_drawn_stakes
-                    .entry((evaluation_id, i))
-                    .read();
+                let drawn_id = self.evaluation_drawn_stakes.entry((evaluation_id, i)).read();
                 if drawn_id == stake_id {
                     return true;
                 }
                 i += 1;
-            };
+            }
             false
         }
 
@@ -1554,12 +1421,17 @@ pub mod Selection {
             let stake = self.stakes.entry(stake_id).read();
             assert(stake.amount >= amount, 'SlashExceedsStake');
             let new_amount = stake.amount - amount;
-            self.stakes.entry(stake_id).write(Stake {
-                owner: stake.owner,
-                amount: new_amount,
-                created_at: stake.created_at,
-                retired: new_amount == 0 || stake.retired,
-            });
+            self
+                .stakes
+                .entry(stake_id)
+                .write(
+                    Stake {
+                        owner: stake.owner,
+                        amount: new_amount,
+                        created_at: stake.created_at,
+                        retired: new_amount == 0 || stake.retired,
+                    },
+                );
         }
 
         fn _release_all_applied_stakes(ref self: ContractState, evaluation_id: u256) {
@@ -1569,19 +1441,12 @@ pub mod Selection {
                 if i >= applied_count {
                     break;
                 }
-                let stake_id = self
-                    .evaluation_applied_stakes
-                    .entry((evaluation_id, i))
-                    .read();
+                let stake_id = self.evaluation_applied_stakes.entry((evaluation_id, i)).read();
                 if stake_id != 0 {
-                    self.stake_applied_to_eval
-                        .entry((stake_id, evaluation_id))
-                        .write(false);
+                    self.stake_applied_to_eval.entry((stake_id, evaluation_id)).write(false);
                     let current = self.stake_evaluation_count.entry(stake_id).read();
                     if current > 0 {
-                        self.stake_evaluation_count
-                            .entry(stake_id)
-                            .write(current - 1);
+                        self.stake_evaluation_count.entry(stake_id).write(current - 1);
                     }
                 }
                 i += 1;
@@ -1595,19 +1460,12 @@ pub mod Selection {
                 if i >= applied_count {
                     break;
                 }
-                let stake_id = self
-                    .evaluation_applied_stakes
-                    .entry((evaluation_id, i))
-                    .read();
+                let stake_id = self.evaluation_applied_stakes.entry((evaluation_id, i)).read();
                 if stake_id != 0 {
-                    self.stake_applied_to_eval
-                        .entry((stake_id, evaluation_id))
-                        .write(false);
+                    self.stake_applied_to_eval.entry((stake_id, evaluation_id)).write(false);
                     let current = self.stake_evaluation_count.entry(stake_id).read();
                     if current > 0 {
-                        self.stake_evaluation_count
-                            .entry(stake_id)
-                            .write(current - 1);
+                        self.stake_evaluation_count.entry(stake_id).write(current - 1);
                     }
                 }
                 i += 1;

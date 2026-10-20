@@ -13,6 +13,6 @@ pub fn lowbit(i: u32) -> u32 {
         }
         x = x / 2;
         bit = bit * 2;
-    };
+    }
     bit
 }
