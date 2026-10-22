@@ -452,11 +452,15 @@ fn test_zero_reveal_refunds_bond() {
     start_cheat_block_timestamp_global(T0 + APPLY_DURATION + 1);
     sel_disp(fx).advance_evaluation(dispute_id);
 
-    // Skip drawing entirely, advance to REVEAL then finalize
+    // Draw jurors -> advances to COMMIT
     sel_disp(fx).draw_jurors(dispute_id);
 
-    const APPLY_DURATION2: u64 = 259_200;
-    start_cheat_block_timestamp_global(T0 + APPLY_DURATION2 + 1 + COMMIT_DURATION + 1);
+    // Advance past commit deadline -> transitions to REVEAL (sets reveal_deadline)
+    start_cheat_block_timestamp_global(T0 + APPLY_DURATION + 1 + COMMIT_DURATION + 1);
+    sel_disp(fx).advance_evaluation(dispute_id);
+
+    // Advance past reveal deadline -> eligible for finalization
+    start_cheat_block_timestamp_global(T0 + APPLY_DURATION + 1 + COMMIT_DURATION + 1 + REVEAL_DURATION + 1);
     sel_disp(fx).finalize_evaluation(dispute_id);
 
     let d = sel.get_dispute(dispute_id);

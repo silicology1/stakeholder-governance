@@ -676,6 +676,7 @@ pub mod Selection {
             self.reentrancyguard.start();
             let mut e = self.evaluations.entry(evaluation_id).read();
             assert(!e.final_score_set, 'AlreadyFinalized');
+            assert(e.phase == PHASE_REVEAL, 'NotRevealPhase');
             assert(get_block_timestamp() >= e.reveal_deadline, 'RevealStillOpen');
 
             let drawn_count = e.drawn_count;
