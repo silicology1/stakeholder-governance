@@ -604,11 +604,6 @@ pub mod Selection {
             assert(get_block_timestamp() < e.reveal_deadline, 'RevealClosed');
             assert(score >= -5 && score <= 5, 'InvalidScore');
 
-            if e.phase == PHASE_COMMIT {
-                e.phase = PHASE_REVEAL;
-                self.evaluations.entry(evaluation_id).write(e);
-            }
-
             let stake = self.stakes.entry(stake_id).read();
             assert(stake.owner == caller, 'NotStakeOwner');
             assert(self._is_stake_drawn(evaluation_id, stake_id), 'NotDrawnStake');
