@@ -505,3 +505,97 @@ fn test_execute_param_change_before_timelock_reverts() {
     start_cheat_block_timestamp_global(T0 + 100);
     atl.execute_set_evaluation_bond_amount();
 }
+
+// ////////////////////////////////////////////////////////////////
+//              MINIMUM STAKE AMOUNT
+// ////////////////////////////////////////////////////////////////
+
+/// Verifies that staking below the minimum amount reverts.
+#[test]
+#[should_panic(expected: ('BelowMinStake',))]
+fn test_stake_below_minimum_reverts() {
+    let fx = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
+    let tok = tok_disp(fx);
+
+    start_cheat_block_timestamp_global(T0);
+    fund(fx, juror(), FUND);
+
+    // Default min stake amount is 1 * ONE (1 token)
+    let below_min = ONE / 100; // 0.01 token
+
+    cheat1(fx.token, juror());
+    tok.approve(juror(), below_min);
+    start_cheat_caller_address(fx.selection, juror());
+    sel_disp(fx).create_stake(below_min);
+}
+
+/// Verifies that staking exactly at the minimum amount succeeds.
+#[test]
+fn test_stake_at_minimum_succeeds() {
+    let fx = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
+    let tok = tok_disp(fx);
+
+    start_cheat_block_timestamp_global(T0);
+    fund(fx, juror(), FUND);
+
+    cheat1(fx.token, juror());
+    tok.approve(juror(), ONE);
+    start_cheat_caller_address(fx.selection, juror());
+    let stake_id = sel_disp(fx).create_stake(ONE);
+
+    let stake = sel_disp(fx).get_stake(stake_id);
+    assert(stake.amount > 0, 'stake amount should be positive');
+}
+
+/// Verifies that the minimum stake amount can be changed via timelock.
+#[test]
+fn test_stake_amount_timelocked_change() {
+    let fx = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
+    let sel = sel_disp(fx);
+    let atl = atl_disp(fx);
+
+    let default_amount = sel.get_stake_amount();
+     assert(default_amount != 0, 'default amount zero');
+
+    start_cheat_block_timestamp_global(T0);
+    start_cheat_caller_address(fx.timelock, admin());
+    atl.propose_set_stake_amount(10 * ONE);
+
+    start_cheat_block_timestamp_global(T0 + TIMELOCK_DURATION + 1);
+    atl.execute_set_stake_amount();
+
+    let new_amount = sel.get_stake_amount();
+    let one_u: u256 = ONE;
+    assert(new_amount != one_u, 'new amount same old amount');
+
+}
+
+/// Verifies that staking below the new minimum reverts after timelock change.
+#[test]
+#[should_panic(expected: ('BelowMinStake',))]
+fn test_stake_below_new_minimum_reverts() {
+    let fx = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
+    let atl = atl_disp(fx);
+    let tok = tok_disp(fx);
+
+    // Raise min stake to 10 tokens
+    start_cheat_block_timestamp_global(T0);
+    start_cheat_caller_address(fx.timelock, admin());
+    atl.propose_set_stake_amount(10 * ONE);
+    start_cheat_block_timestamp_global(T0 + TIMELOCK_DURATION + 1);
+    atl.execute_set_stake_amount();
+
+    let sel = sel_disp(fx);
+    let new_amount = sel.get_stake_amount();
+    let one_u: u256 = ONE;
+    assert(new_amount != one_u, 'new amount same old amount');
+
+    start_cheat_block_timestamp_global(T0);
+    fund(fx, juror(), FUND);
+
+    // Try to stake 1 token (below new minimum of 10)
+    cheat1(fx.token, juror());
+    tok.approve(juror(), ONE);
+    start_cheat_caller_address(fx.selection, juror());
+    sel_disp(fx).create_stake(ONE);
+}

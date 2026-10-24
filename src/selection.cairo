@@ -83,6 +83,7 @@ pub mod Selection {
         max_evaluations_per_stake: u32,
         juror_reward_amount: u256,
         drawing_duration: u64,
+        min_stake_amount: u256,
         stake_count: u256,
         stakes: Map<u256, Stake>,
         juror_stake_ids: Map<(ContractAddress, u32), u256>,
@@ -184,6 +185,7 @@ pub mod Selection {
         self.max_evaluations_per_stake.write(DEFAULT_MAX_EVALUATIONS_PER_STAKE);
         self.juror_reward_amount.write(DEFAULT_JUROR_REWARD_AMOUNT);
         self.drawing_duration.write(DEFAULT_DRAWING_DURATION);
+        self.min_stake_amount.write(DEFAULT_MIN_STAKE_AMOUNT);
     }
 
     #[abi(embed_v0)]
@@ -193,6 +195,7 @@ pub mod Selection {
         fn create_stake(ref self: ContractState, amount: u256) -> u256 {
             self.reentrancyguard.start();
             assert(amount > 0, 'ZeroAmount');
+            assert(amount >= self.min_stake_amount.read(), 'BelowMinStake');
             let caller = get_caller_address();
 
             self._token().escrow(caller, amount);
@@ -1058,6 +1061,13 @@ pub mod Selection {
             self.vrf_consumer.set_vrf_provider(provider);
         }
 
+        fn execute_set_stake_amount(ref self: ContractState, amount: u256) {
+            self._assert_admin();
+            assert(amount > 0, 'ZeroAmount');
+            assert(amount <= MAX_STAKE_AMOUNT, 'TooHigh');
+            self.min_stake_amount.write(amount);
+        }
+
         // ---- views ----
 
         fn get_dispute(self: @ContractState, dispute_id: u256) -> Dispute {
@@ -1260,6 +1270,10 @@ pub mod Selection {
 
         fn get_drawing_duration(self: @ContractState) -> u64 {
             self.drawing_duration.read()
+        }
+
+        fn get_stake_amount(self: @ContractState) -> u256 {
+            self.min_stake_amount.read()
         }
     }
 

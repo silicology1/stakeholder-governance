@@ -820,6 +820,48 @@ pub mod AdminTimelock {
             self.reentrancyguard.end();
         }
 
+        fn propose_set_stake_amount(ref self: ContractState, amount: u256) {
+            self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
+            assert(amount > 0, 'ZeroAmount');
+            assert(amount <= MAX_STAKE_AMOUNT, 'TooHigh');
+            let effective_at = get_block_timestamp() + TIMELOCK_DURATION;
+            self
+                .pending_changes
+                .entry((self.selection.read(), PARAM_STAKE_AMOUNT))
+                .write(PendingChange { new_value: amount, effective_at, exists: true });
+            self
+                .emit(
+                    ChangeProposed {
+                        target: self.selection.read(),
+                        param_key: PARAM_STAKE_AMOUNT,
+                        new_value: amount,
+                        effective_at,
+                    },
+                );
+        }
+
+        fn execute_set_stake_amount(ref self: ContractState) {
+            self.reentrancyguard.start();
+            self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
+            let target = self.selection.read();
+            let pc = self.pending_changes.entry((target, PARAM_STAKE_AMOUNT)).read();
+            assert(pc.exists, 'NoPendingChange');
+            assert(get_block_timestamp() >= pc.effective_at, 'TimelockNotElapsed');
+            self
+                .pending_changes
+                .entry((target, PARAM_STAKE_AMOUNT))
+                .write(PendingChange { new_value: 0, effective_at: 0, exists: false });
+            ISelectionDispatcher { contract_address: target }
+                .execute_set_stake_amount(pc.new_value);
+            self
+                .emit(
+                    ChangeExecuted {
+                        target, param_key: PARAM_STAKE_AMOUNT, new_value: pc.new_value,
+                    },
+                );
+            self.reentrancyguard.end();
+        }
+
         // ================================================================
         // ADMIN - timelocked parameter changes (ConvictionToken module)
         // ================================================================

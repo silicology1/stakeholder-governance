@@ -115,4 +115,6 @@ pub trait ISelection<TContractState> {
     fn get_max_evaluations_per_stake(self: @TContractState) -> u32;
     fn get_juror_reward_amount(self: @TContractState) -> u256;
     fn get_drawing_duration(self: @TContractState) -> u64;
+    fn get_stake_amount(self: @TContractState) -> u256;
+    fn execute_set_stake_amount(ref self: TContractState, amount: u256);
 }

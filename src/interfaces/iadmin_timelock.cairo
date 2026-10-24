@@ -123,6 +123,8 @@ pub trait IAdminTimelock<TContractState> {
     fn propose_disable_upgrades(ref self: TContractState, target: ContractAddress);
     fn execute_disable_upgrades(ref self: TContractState, target: ContractAddress);
     fn is_upgrades_disabled(self: @TContractState, target: ContractAddress) -> bool;
+    fn propose_set_stake_amount(ref self: TContractState, amount: u256);
+    fn execute_set_stake_amount(ref self: TContractState);
     fn get_pending_upgrade(self: @TContractState, target: ContractAddress) -> PendingUpgrade;
     fn get_pending_upgrade_disable(self: @TContractState, target: ContractAddress) -> PendingChange;
 }

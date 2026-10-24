@@ -150,6 +150,8 @@ pub const PARAM_MAX_VOTES_PER_CONVICTION: felt252 = 'MAX_VOTES_CONVICTION';
 pub const PARAM_PROPOSAL_VOTING_PERIOD: felt252 = 'PROPOSAL_VOTE_WINDOW';
 /// Storage key for the evaluation cooldown before a candidate may reapply.
 pub const PARAM_EVALUATION_COOLDOWN: felt252 = 'EVAL_COOLDOWN';
+/// Storage key for the minimum stake amount.
+pub const PARAM_STAKE_AMOUNT: felt252 = 'STAKE_AMOUNT';
 
 /// ---- Evaluation lifecycle phases ----
 
@@ -174,6 +176,12 @@ pub const DEFAULT_APPLYING_DURATION: u64 = 259_200;
 pub const MAX_APPLYING_DURATION: u64 = 8_640_000;
 /// Default minimum number of stake IDs required per evaluation.
 pub const DEFAULT_MIN_STAKE_IDS: u32 = 15;
+
+/// Default minimum ERC20 amount required to create a stake.
+pub const DEFAULT_MIN_STAKE_AMOUNT: u256 = 1_000_000_000_000_000_000; // 1 token
+/// Maximum configurable minimum stake amount (admin-timelocked).
+pub const MAX_STAKE_AMOUNT: u256 = 1_000_000_000_000_000_000_000_000; // 1M tokens
+
 
 // ---- Drawing phase ----
 
