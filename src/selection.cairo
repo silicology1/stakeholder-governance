@@ -885,11 +885,7 @@ pub mod Selection {
             }
 
             let mint_amount = governance_tokens_for_score(final_score);
-            if mint_amount > 0 {
-                IGovernanceDispatcher { contract_address: self.governance.read() }
-                    .mint_governance_tokens(e.candidate, mint_amount);
-                e.governance_tokens_minted = mint_amount;
-            }
+            e.governance_tokens_minted = mint_amount;
 
             let bond_amount = e.bond_amount;
             let requester = e.requester;
@@ -915,6 +911,12 @@ pub mod Selection {
                         },
                     );
             }
+
+            if mint_amount > 0 {
+                IGovernanceDispatcher { contract_address: self.governance.read() }
+                    .mint_governance_tokens(e.candidate, mint_amount);
+            }
+
             if refund_bond {
                 self._token().release(requester, bond_amount);
                 self.emit(BondRefunded { evaluation_id, requester, amount: bond_amount });
