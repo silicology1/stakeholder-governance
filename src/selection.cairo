@@ -353,7 +353,12 @@ pub mod Selection {
             let caller = get_caller_address();
 
             let mut e = self.evaluations.entry(evaluation_id).read();
-            assert(e.phase == PHASE_APPLYING || e.phase == PHASE_COMMIT, 'WrongPhaseForRemoval');
+            assert(
+                e.phase == PHASE_APPLYING
+                || e.phase == PHASE_COMMIT
+                || e.phase == PHASE_DISMISSED,
+                'WrongPhaseForRemoval',
+            );
 
             let stake = self.stakes.entry(stake_id).read();
             assert(stake.owner == caller, 'NotStakeOwner');
@@ -465,8 +470,6 @@ pub mod Selection {
                     e.phase = PHASE_DISMISSED;
                     self.evaluations.entry(evaluation_id).write(e);
                     self.emit(EvaluationDismissed { evaluation_id, candidate: e.candidate });
-
-                    self._release_all_applied_stakes(evaluation_id);
 
                     if e.bond_amount > 0 && e.requester.is_non_zero() {
                         self._token().release(e.requester, e.bond_amount);
@@ -1442,25 +1445,6 @@ pub mod Selection {
                         retired: new_amount == 0 || stake.retired,
                     },
                 );
-        }
-
-        fn _release_all_applied_stakes(ref self: ContractState, evaluation_id: u256) {
-            let applied_count = self.evaluation_applied_count.entry(evaluation_id).read();
-            let mut i: u32 = 0;
-            loop {
-                if i >= applied_count {
-                    break;
-                }
-                let stake_id = self.evaluation_applied_stakes.entry((evaluation_id, i)).read();
-                if stake_id != 0 {
-                    self.stake_applied_to_eval.entry((stake_id, evaluation_id)).write(false);
-                    let current = self.stake_evaluation_count.entry(stake_id).read();
-                    if current > 0 {
-                        self.stake_evaluation_count.entry(stake_id).write(current - 1);
-                    }
-                }
-                i += 1;
-            };
         }
 
         fn _finalize_cleanup(ref self: ContractState, evaluation_id: u256) {
