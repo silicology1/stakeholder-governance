@@ -468,8 +468,14 @@ pub mod Selection {
                     self.emit(EvaluationAdvanced { evaluation_id, phase: PHASE_COMMIT });
                 } else {
                     e.phase = PHASE_DISMISSED;
+                    assert(!e.bond_settled, 'BondAlreadySettled');
+                    e.bond_settled = true;
                     self.evaluations.entry(evaluation_id).write(e);
                     self.emit(EvaluationDismissed { evaluation_id, candidate: e.candidate });
+
+                    self.has_active_evaluation.entry(e.requester).write(false);
+                    self.active_evaluation_for_candidate.entry(e.requester).write(0);
+                    self.last_evaluation_finalized.entry(e.requester).write(now);
 
                     if e.bond_amount > 0 && e.requester.is_non_zero() {
                         self._token().release(e.requester, e.bond_amount);
@@ -480,9 +486,6 @@ pub mod Selection {
                                 },
                             );
                     }
-                    self.has_active_evaluation.entry(e.requester).write(false);
-                    self.active_evaluation_for_candidate.entry(e.requester).write(0);
-                    self.last_evaluation_finalized.entry(e.requester).write(now);
                 }
             } else if e.phase == PHASE_COMMIT {
                 if now < e.commit_deadline {
