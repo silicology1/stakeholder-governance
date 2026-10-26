@@ -55,6 +55,14 @@ pub trait IAdminTimelock<TContractState> {
     fn propose_set_selection_admin(ref self: TContractState, new_admin: ContractAddress);
     fn execute_set_selection_admin(ref self: TContractState);
 
+    fn propose_set_governance_admin(ref self: TContractState, new_admin: ContractAddress);
+    fn execute_set_governance_admin(ref self: TContractState);
+
+    fn propose_set_conviction_token_admin(
+        ref self: TContractState, new_admin: ContractAddress,
+    );
+    fn execute_set_conviction_token_admin(ref self: TContractState);
+
     // ---- parameter changes (ConvictionToken module) ----
 
     fn propose_set_decay_rate_bps(ref self: TContractState, bps: u16);

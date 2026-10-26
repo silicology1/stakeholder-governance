@@ -41,7 +41,8 @@ pub trait IGovernance<TContractState> {
 
     // ---- admin ----
 
-    fn set_admin(ref self: TContractState, new_admin: ContractAddress);
+    /// Executed by AdminTimelock after timelock to change Governance's admin.
+    fn execute_set_admin(ref self: TContractState, new_admin: ContractAddress);
     fn set_selection(ref self: TContractState, selection: ContractAddress);
     fn get_admin(self: @TContractState) -> ContractAddress;
     fn get_selection(self: @TContractState) -> ContractAddress;

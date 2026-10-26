@@ -224,3 +224,7 @@ pub const PARAM_JUROR_REWARD_AMOUNT: felt252 = 'JUROR_REWARD';
 pub const PARAM_DRAWING_DURATION: felt252 = 'DRAW_DURATION';
 /// Timelocked-parameter key for changing Selection's admin address.
 pub const PARAM_SET_ADMIN: felt252 = 'SET_ADMIN';
+/// Timelocked-parameter key for changing Governance's admin address.
+pub const PARAM_SET_GOVERNANCE_ADMIN: felt252 = 'SET_GOV_ADMIN';
+/// Timelocked-parameter key for changing ConvictionToken's admin address.
+pub const PARAM_SET_CONVICTION_TOKEN_ADMIN: felt252 = 'SET_TOKEN_ADMIN';

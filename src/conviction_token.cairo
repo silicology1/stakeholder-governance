@@ -225,9 +225,9 @@ pub mod ConvictionToken {
             self._mint_from_budget(to, amount)
         }
 
-        // ---- admin ----
+        // ---- ADMIN - timelocked parameter changes (executed by AdminTimelock) ----
 
-        fn set_admin(ref self: ContractState, new_admin: ContractAddress) {
+        fn execute_set_admin(ref self: ContractState, new_admin: ContractAddress) {
             self._assert_admin();
             assert(new_admin.is_non_zero(), 'ZeroAddress');
             self.admin.write(new_admin);

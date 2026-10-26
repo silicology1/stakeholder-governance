@@ -156,11 +156,11 @@ fn deploy(threshold: u256, reward_multiplier: u256, mini_reward_multiplier: u256
 
     // Hand admin authority to timelock
     cheat1(token, admin());
-    IConvictionTokenDispatcher { contract_address: token }.set_admin(timelock);
+    IConvictionTokenDispatcher { contract_address: token }.execute_set_admin(timelock);
     cheat1(selection, admin());
     ISelectionDispatcher { contract_address: selection }.execute_set_admin(timelock);
     cheat1(governance, admin());
-    IGovernanceDispatcher { contract_address: governance }.set_admin(timelock);
+    IGovernanceDispatcher { contract_address: governance }.execute_set_admin(timelock);
 
     // Deterministic VRF
     start_mock_call::<felt252>(vrf_provider(), selector!("consume_random"), 0x1234abcd);
