@@ -60,7 +60,8 @@ pub trait ISelection<TContractState> {
 
     // ---- admin ----
 
-    fn set_admin(ref self: TContractState, new_admin: ContractAddress);
+    /// Executed by AdminTimelock after timelock to change Selection's admin.
+    fn execute_set_admin(ref self: TContractState, new_admin: ContractAddress);
     fn get_admin(self: @TContractState) -> ContractAddress;
 
     // ---- ADMIN - timelocked parameter changes (executed by AdminTimelock) ----

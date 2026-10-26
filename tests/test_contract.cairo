@@ -158,7 +158,7 @@ fn deploy(threshold: u256, reward_multiplier: u256, mini_reward_multiplier: u256
     cheat1(token, admin());
     IConvictionTokenDispatcher { contract_address: token }.set_admin(timelock);
     cheat1(selection, admin());
-    ISelectionDispatcher { contract_address: selection }.set_admin(timelock);
+    ISelectionDispatcher { contract_address: selection }.execute_set_admin(timelock);
     cheat1(governance, admin());
     IGovernanceDispatcher { contract_address: governance }.set_admin(timelock);
 

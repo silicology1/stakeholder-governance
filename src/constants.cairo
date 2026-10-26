@@ -222,3 +222,5 @@ pub const PARAM_MIN_JURORS: felt252 = 'MIN_JURORS';
 pub const PARAM_MAX_EVALUATIONS_PER_STAKE: felt252 = 'MAX_EVAL_PER_STAKE';
 pub const PARAM_JUROR_REWARD_AMOUNT: felt252 = 'JUROR_REWARD';
 pub const PARAM_DRAWING_DURATION: felt252 = 'DRAW_DURATION';
+/// Timelocked-parameter key for changing Selection's admin address.
+pub const PARAM_SET_ADMIN: felt252 = 'SET_ADMIN';

@@ -862,6 +862,58 @@ pub mod AdminTimelock {
             self.reentrancyguard.end();
         }
 
+        // ---- admin roster: Selection admin change via timelock ----
+
+        fn propose_set_selection_admin(ref self: ContractState, new_admin: ContractAddress) {
+            self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
+            assert(new_admin.is_non_zero(), 'ZeroAddress');
+            let effective_at = get_block_timestamp() + TIMELOCK_DURATION;
+            let new_admin_felt: felt252 = new_admin.try_into().unwrap();
+            let new_admin_u256: u256 = new_admin_felt.try_into().unwrap();
+            self
+                .pending_changes
+                .entry((self.selection.read(), PARAM_SET_ADMIN))
+                .write(PendingChange {
+                    new_value: new_admin_u256,
+                    effective_at,
+                    exists: true,
+                });
+            self
+                .emit(
+                    ChangeProposed {
+                        target: self.selection.read(),
+                        param_key: PARAM_SET_ADMIN,
+                        new_value: new_admin_u256,
+                        effective_at,
+                    },
+                );
+        }
+
+        fn execute_set_selection_admin(ref self: ContractState) {
+            self.reentrancyguard.start();
+            self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
+            let target = self.selection.read();
+            let pc = self.pending_changes.entry((target, PARAM_SET_ADMIN)).read();
+            assert(pc.exists, 'NoPendingChange');
+            assert(get_block_timestamp() >= pc.effective_at, 'TimelockNotElapsed');
+            self
+                .pending_changes
+                .entry((target, PARAM_SET_ADMIN))
+                .write(PendingChange { new_value: 0, effective_at: 0, exists: false });
+            let new_admin_felt: felt252 = pc.new_value.try_into().unwrap();
+            let new_admin: ContractAddress = new_admin_felt.try_into().unwrap();
+            ISelectionDispatcher { contract_address: target }.execute_set_admin(new_admin);
+            self
+                .emit(
+                    ChangeExecuted {
+                        target,
+                        param_key: PARAM_SET_ADMIN,
+                        new_value: pc.new_value,
+                    },
+                );
+            self.reentrancyguard.end();
+        }
+
         // ================================================================
         // ADMIN - timelocked parameter changes (ConvictionToken module)
         // ================================================================
