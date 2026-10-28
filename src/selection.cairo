@@ -99,7 +99,6 @@ pub mod Selection {
         evaluation_applied_stakes: Map<(u256, u32), u256>,
         evaluation_applied_count: Map<u256, u32>,
         evaluation_drawn_stakes: Map<(u256, u32), u256>,
-        evaluation_drawn_count: Map<u256, u32>,
         evaluation_draw_index: Map<u256, u32>,
         evaluation_commit: Map<(u256, u256), felt252>,
         evaluation_committed: Map<(u256, u256), bool>,
@@ -590,7 +589,10 @@ pub mod Selection {
 
             let stake = self.stakes.entry(stake_id).read();
             assert(stake.owner == caller, 'NotStakeOwner');
-            assert(self._is_stake_drawn(evaluation_id, stake_id), 'NotDrawnStake');
+            assert(
+                self._is_stake_drawn(evaluation_id, stake_id, e.drawn_count),
+                'NotDrawnStake',
+            );
             assert(
                 !self.evaluation_committed.entry((evaluation_id, stake_id)).read(),
                 'AlreadyCommitted',
@@ -615,7 +617,10 @@ pub mod Selection {
 
             let stake = self.stakes.entry(stake_id).read();
             assert(stake.owner == caller, 'NotStakeOwner');
-            assert(self._is_stake_drawn(evaluation_id, stake_id), 'NotDrawnStake');
+            assert(
+                self._is_stake_drawn(evaluation_id, stake_id, e.drawn_count),
+                'NotDrawnStake',
+            );
             assert(self.evaluation_committed.entry((evaluation_id, stake_id)).read(), 'NoCommit');
             assert(
                 !self.evaluation_revealed.entry((evaluation_id, stake_id)).read(),
@@ -641,7 +646,10 @@ pub mod Selection {
             let e = self.evaluations.entry(evaluation_id).read();
             assert(get_block_timestamp() >= e.reveal_deadline, 'RevealStillOpen');
 
-            assert(self._is_stake_drawn(evaluation_id, stake_id), 'NotDrawnStake');
+            assert(
+                self._is_stake_drawn(evaluation_id, stake_id, e.drawn_count),
+                'NotDrawnStake',
+            );
             assert(!self.evaluation_revealed.entry((evaluation_id, stake_id)).read(), 'DidReveal');
             assert(
                 !self.evaluation_slashed.entry((evaluation_id, stake_id)).read(), 'AlreadySlashed',
@@ -1419,8 +1427,9 @@ pub mod Selection {
             pos + 1
         }
 
-        fn _is_stake_drawn(self: @ContractState, evaluation_id: u256, stake_id: u256) -> bool {
-            let drawn_count = self.evaluation_drawn_count.entry(evaluation_id).read();
+        fn _is_stake_drawn(
+            self: @ContractState, evaluation_id: u256, stake_id: u256, drawn_count: u32,
+        ) -> bool {
             let mut i: u32 = 0;
             loop {
                 if i >= drawn_count {
