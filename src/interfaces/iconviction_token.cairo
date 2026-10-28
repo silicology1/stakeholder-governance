@@ -39,9 +39,9 @@ pub trait IConvictionToken<TContractState> {
     /// Executed by AdminTimelock after timelock to change ConvictionToken's admin.
     fn execute_set_admin(ref self: TContractState, new_admin: ContractAddress);
 
-    /// Registers the `Selection` and `Governance` module addresses allowed to
-    /// use the module-gated custody entrypoints.
-    fn set_modules(
+    /// Executed by AdminTimelock after timelock to register Selection and Governance
+    /// module addresses allowed to use the module-gated custody entrypoints.
+    fn execute_set_modules(
         ref self: TContractState, selection: ContractAddress, governance: ContractAddress,
     );
 

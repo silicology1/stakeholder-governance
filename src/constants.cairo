@@ -228,3 +228,9 @@ pub const PARAM_SET_ADMIN: felt252 = 'SET_ADMIN';
 pub const PARAM_SET_GOVERNANCE_ADMIN: felt252 = 'SET_GOV_ADMIN';
 /// Timelocked-parameter key for changing ConvictionToken's admin address.
 pub const PARAM_SET_CONVICTION_TOKEN_ADMIN: felt252 = 'SET_TOKEN_ADMIN';
+/// Timelocked-parameter key for changing Governance's selection module address.
+pub const PARAM_SET_GOVERNANCE_SELECTION: felt252 = 'SET_GOV_SELECTION';
+/// Timelocked-parameter key for changing ConvictionToken's Selection module address.
+pub const PARAM_SET_CONVICTION_TOKEN_SELECTION: felt252 = 'SET_TOKEN_SELECTION';
+/// Timelocked-parameter key for changing ConvictionToken's Governance module address.
+pub const PARAM_SET_CONVICTION_TOKEN_GOVERNANCE: felt252 = 'SET_TOKEN_GOVERNANCE';

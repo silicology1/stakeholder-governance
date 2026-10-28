@@ -428,7 +428,7 @@ pub mod Governance {
             self.emit(AdminChanged { new_admin });
         }
 
-        fn set_selection(ref self: ContractState, selection: ContractAddress) {
+        fn execute_set_selection(ref self: ContractState, selection: ContractAddress) {
             self._assert_admin();
             self.selection.write(selection);
             self.emit(SelectionSet { selection });

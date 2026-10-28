@@ -234,7 +234,7 @@ pub mod ConvictionToken {
             self.emit(AdminChanged { new_admin });
         }
 
-        fn set_modules(
+        fn execute_set_modules(
             ref self: ContractState, selection: ContractAddress, governance: ContractAddress,
         ) {
             self._assert_admin();

@@ -1023,6 +1023,162 @@ pub mod AdminTimelock {
             self.reentrancyguard.end();
         }
 
+        // ---- admin roster: Governance selection module change via timelock ----
+
+        fn propose_set_governance_selection(
+            ref self: ContractState, selection: ContractAddress,
+        ) {
+            self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
+            assert(selection.is_non_zero(), 'ZeroAddress');
+            let effective_at = get_block_timestamp() + TIMELOCK_DURATION;
+            let selection_felt: felt252 = selection.try_into().unwrap();
+            let selection_u256: u256 = selection_felt.try_into().unwrap();
+            self
+                .pending_changes
+                .entry((self.governance.read(), PARAM_SET_GOVERNANCE_SELECTION))
+                .write(PendingChange {
+                    new_value: selection_u256,
+                    effective_at,
+                    exists: true,
+                });
+            self
+                .emit(
+                    ChangeProposed {
+                        target: self.governance.read(),
+                        param_key: PARAM_SET_GOVERNANCE_SELECTION,
+                        new_value: selection_u256,
+                        effective_at,
+                    },
+                );
+        }
+
+        fn execute_set_governance_selection(ref self: ContractState) {
+            self.reentrancyguard.start();
+            self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
+            let target = self.governance.read();
+            let pc = self
+                .pending_changes
+                .entry((target, PARAM_SET_GOVERNANCE_SELECTION))
+                .read();
+            assert(pc.exists, 'NoPendingChange');
+            assert(get_block_timestamp() >= pc.effective_at, 'TimelockNotElapsed');
+            self
+                .pending_changes
+                .entry((target, PARAM_SET_GOVERNANCE_SELECTION))
+                .write(PendingChange { new_value: 0, effective_at: 0, exists: false });
+            let selection_felt: felt252 = pc.new_value.try_into().unwrap();
+            let selection: ContractAddress = selection_felt.try_into().unwrap();
+            IGovernanceDispatcher { contract_address: target }
+                .execute_set_selection(selection);
+            self
+                .emit(
+                    ChangeExecuted {
+                        target,
+                        param_key: PARAM_SET_GOVERNANCE_SELECTION,
+                        new_value: pc.new_value,
+                    },
+                );
+            self.reentrancyguard.end();
+        }
+
+        // ---- admin roster: ConvictionToken modules change via timelock ----
+
+        fn propose_set_conviction_token_modules(
+            ref self: ContractState, selection: ContractAddress, governance: ContractAddress,
+        ) {
+            self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
+            assert(selection.is_non_zero(), 'ZeroAddress');
+            assert(governance.is_non_zero(), 'ZeroAddress');
+            let effective_at = get_block_timestamp() + TIMELOCK_DURATION;
+            let selection_felt: felt252 = selection.try_into().unwrap();
+            let selection_u256: u256 = selection_felt.try_into().unwrap();
+            let governance_felt: felt252 = governance.try_into().unwrap();
+            let governance_u256: u256 = governance_felt.try_into().unwrap();
+            self
+                .pending_changes
+                .entry((self.token.read(), PARAM_SET_CONVICTION_TOKEN_SELECTION))
+                .write(PendingChange {
+                    new_value: selection_u256,
+                    effective_at,
+                    exists: true,
+                });
+            self
+                .pending_changes
+                .entry((self.token.read(), PARAM_SET_CONVICTION_TOKEN_GOVERNANCE))
+                .write(PendingChange {
+                    new_value: governance_u256,
+                    effective_at,
+                    exists: true,
+                });
+            self
+                .emit(
+                    ChangeProposed {
+                        target: self.token.read(),
+                        param_key: PARAM_SET_CONVICTION_TOKEN_SELECTION,
+                        new_value: selection_u256,
+                        effective_at,
+                    },
+                );
+            self
+                .emit(
+                    ChangeProposed {
+                        target: self.token.read(),
+                        param_key: PARAM_SET_CONVICTION_TOKEN_GOVERNANCE,
+                        new_value: governance_u256,
+                        effective_at,
+                    },
+                );
+        }
+
+        fn execute_set_conviction_token_modules(ref self: ContractState) {
+            self.reentrancyguard.start();
+            self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
+            let target = self.token.read();
+            let sel_pc = self
+                .pending_changes
+                .entry((target, PARAM_SET_CONVICTION_TOKEN_SELECTION))
+                .read();
+            let gov_pc = self
+                .pending_changes
+                .entry((target, PARAM_SET_CONVICTION_TOKEN_GOVERNANCE))
+                .read();
+            assert(sel_pc.exists, 'NoPendingChange');
+            assert(gov_pc.exists, 'NoPendingChange');
+            assert(get_block_timestamp() >= sel_pc.effective_at, 'TimelockNotElapsed');
+            assert(get_block_timestamp() >= gov_pc.effective_at, 'TimelockNotElapsed');
+            self
+                .pending_changes
+                .entry((target, PARAM_SET_CONVICTION_TOKEN_SELECTION))
+                .write(PendingChange { new_value: 0, effective_at: 0, exists: false });
+            self
+                .pending_changes
+                .entry((target, PARAM_SET_CONVICTION_TOKEN_GOVERNANCE))
+                .write(PendingChange { new_value: 0, effective_at: 0, exists: false });
+            let selection_felt: felt252 = sel_pc.new_value.try_into().unwrap();
+            let selection: ContractAddress = selection_felt.try_into().unwrap();
+            let governance_felt: felt252 = gov_pc.new_value.try_into().unwrap();
+            let governance_addr: ContractAddress = governance_felt.try_into().unwrap();
+            IConvictionTokenDispatcher { contract_address: target }
+                .execute_set_modules(selection, governance_addr);
+            self
+                .emit(
+                    ChangeExecuted {
+                        target,
+                        param_key: PARAM_SET_CONVICTION_TOKEN_SELECTION,
+                        new_value: sel_pc.new_value,
+                    },
+                );
+            self
+                .emit(
+                    ChangeExecuted {
+                        target,
+                        param_key: PARAM_SET_CONVICTION_TOKEN_GOVERNANCE,
+                        new_value: gov_pc.new_value,
+                    },
+                );
+            self.reentrancyguard.end();
+        }
+
         // ================================================================
         // ADMIN - timelocked parameter changes (ConvictionToken module)
         // ================================================================

@@ -141,9 +141,9 @@ fn deploy(threshold: u256, reward_multiplier: u256, mini_reward_multiplier: u256
 
     // Wire custody graph
     cheat1(token, admin());
-    IConvictionTokenDispatcher { contract_address: token }.set_modules(selection, governance);
+    IConvictionTokenDispatcher { contract_address: token }.execute_set_modules(selection, governance);
     cheat1(governance, admin());
-    IGovernanceDispatcher { contract_address: governance }.set_selection(selection);
+    IGovernanceDispatcher { contract_address: governance }.execute_set_selection(selection);
 
     // AdminTimelock
     let atl_class = declare("AdminTimelock").unwrap().contract_class();
@@ -153,6 +153,12 @@ fn deploy(threshold: u256, reward_multiplier: u256, mini_reward_multiplier: u256
     calldata.append(selection.into());
     calldata.append(governance.into());
     let (timelock, _) = atl_class.deploy(@calldata).unwrap();
+
+    // Wire custody graph (while deployer is still admin)
+    cheat1(token, admin());
+    IConvictionTokenDispatcher { contract_address: token }.execute_set_modules(selection, governance);
+    cheat1(governance, admin());
+    IGovernanceDispatcher { contract_address: governance }.execute_set_selection(selection);
 
     // Hand admin authority to timelock
     cheat1(token, admin());
