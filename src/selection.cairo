@@ -644,6 +644,11 @@ pub mod Selection {
         fn slash_non_revealer(ref self: ContractState, evaluation_id: u256, stake_id: u256) {
             self.reentrancyguard.start();
             let e = self.evaluations.entry(evaluation_id).read();
+            assert(
+                e.phase == PHASE_REVEAL || e.phase == PHASE_FINALIZED,
+                'WrongPhaseForSlash',
+            );
+            assert(e.reveal_deadline != 0, 'RevealNotStarted');
             assert(get_block_timestamp() >= e.reveal_deadline, 'RevealStillOpen');
 
             assert(
