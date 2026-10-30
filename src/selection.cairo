@@ -89,6 +89,7 @@ pub mod Selection {
         juror_stake_ids: Map<(ContractAddress, u32), u256>,
         juror_stake_count: Map<ContractAddress, u32>,
         stake_evaluation_count: Map<u256, u32>,
+        stake_finalized_count: Map<u256, u32>,
         stake_applied_to_eval: Map<(u256, u256), bool>,
         evaluation_count: u256,
         evaluations: Map<u256, Evaluation>,
@@ -98,6 +99,7 @@ pub mod Selection {
         evaluation_next_index: Map<u256, u32>,
         evaluation_applied_stakes: Map<(u256, u32), u256>,
         evaluation_applied_count: Map<u256, u32>,
+        evaluation_applied_slot: Map<(u256, u256), u32>,
         evaluation_drawn_stakes: Map<(u256, u32), u256>,
         evaluation_draw_index: Map<u256, u32>,
         evaluation_is_drawn: Map<(u256, u256), bool>,
@@ -322,7 +324,13 @@ pub mod Selection {
                 !self.stake_applied_to_eval.entry((stake_id, evaluation_id)).read(),
                 'AlreadyApplied',
             );
-            assert(current_evals < max_evals, 'MaxEvaluationsPerStake');
+            // lifetime cap: finalized participations are never freed, so the
+            // combined count bounds all finalized evaluations ever entered
+            let finalized_total = self.stake_finalized_count.entry(stake_id).read();
+            assert(
+                finalized_total + current_evals < max_evals,
+                'StakeFinalizedLimitReached',
+            );
 
             let next_idx = self.evaluation_next_index.entry(evaluation_id).read();
             assert(next_idx < EVAL_FENWICK_SIZE, 'EvaluationCapacityExceeded');
@@ -334,6 +342,7 @@ pub mod Selection {
             self.evaluation_stake_to_index.entry((evaluation_id, stake_id)).write(fenwick_index);
             self.evaluation_index_to_stake.entry((evaluation_id, fenwick_index)).write(stake_id);
             self.evaluation_applied_stakes.entry((evaluation_id, e.applied_count)).write(stake_id);
+            self.evaluation_applied_slot.entry((evaluation_id, stake_id)).write(e.applied_count);
             e.applied_count += 1;
 
             self.stake_applied_to_eval.entry((stake_id, evaluation_id)).write(true);
@@ -356,7 +365,8 @@ pub mod Selection {
             assert(
                 e.phase == PHASE_APPLYING
                 || e.phase == PHASE_COMMIT
-                || e.phase == PHASE_DISMISSED,
+                || e.phase == PHASE_DISMISSED
+                || e.phase == PHASE_FINALIZED,
                 'WrongPhaseForRemoval',
             );
 
@@ -385,29 +395,20 @@ pub mod Selection {
             }
 
             let applied_count = e.applied_count;
-            let mut found: bool = false;
-            let mut i: u32 = 0;
-            loop {
-                if i >= applied_count {
-                    break;
-                }
-                let sid = self.evaluation_applied_stakes.entry((evaluation_id, i)).read();
-                if sid == stake_id {
-                    found = true;
-                    let last_idx = applied_count - 1;
-                    if i != last_idx {
-                        let last_sid = self
-                            .evaluation_applied_stakes
-                            .entry((evaluation_id, last_idx))
-                            .read();
-                        self.evaluation_applied_stakes.entry((evaluation_id, i)).write(last_sid);
-                    }
-                    self.evaluation_applied_stakes.entry((evaluation_id, last_idx)).write(0);
-                    break;
-                }
-                i += 1;
+            let slot = self.evaluation_applied_slot.entry((evaluation_id, stake_id)).read();
+            assert(slot < applied_count, 'StakeNotInAppliedList');
+            let sid = self.evaluation_applied_stakes.entry((evaluation_id, slot)).read();
+            assert(sid == stake_id, 'StakeNotInAppliedList');
+
+            let last_idx = applied_count - 1;
+            if slot != last_idx {
+                let last_sid = self.evaluation_applied_stakes.entry((evaluation_id, last_idx)).read();
+                self.evaluation_applied_stakes.entry((evaluation_id, slot)).write(last_sid);
+                // keep the moved stake's slot map entry in sync with its new position
+                self.evaluation_applied_slot.entry((evaluation_id, last_sid)).write(slot);
             }
-            assert(found, 'StakeNotInAppliedList');
+            self.evaluation_applied_stakes.entry((evaluation_id, last_idx)).write(0);
+            self.evaluation_applied_slot.entry((evaluation_id, stake_id)).write(0);
 
             e.applied_count = applied_count - 1;
             self.evaluations.entry(evaluation_id).write(e);
@@ -417,6 +418,12 @@ pub mod Selection {
             let current_count = self.stake_evaluation_count.entry(stake_id).read();
             assert(current_count > 0, 'CountUnderflow');
             self.stake_evaluation_count.entry(stake_id).write(current_count - 1);
+
+            // finalized participation counts against the stake's lifetime cap
+            if e.phase == PHASE_FINALIZED {
+                let finalized_total = self.stake_finalized_count.entry(stake_id).read();
+                self.stake_finalized_count.entry(stake_id).write(finalized_total + 1);
+            }
 
             self.emit(StakeRemoved { evaluation_id, stake_id, owner: caller });
 
@@ -722,8 +729,6 @@ pub mod Selection {
                 let bond_to_refund = e.bond_amount;
                 self.evaluations.entry(evaluation_id).write(e);
 
-                self._finalize_cleanup(evaluation_id);
-
                 if requester.is_non_zero() {
                     self.has_active_evaluation.entry(requester).write(false);
                     self.active_evaluation_for_candidate.entry(requester).write(0);
@@ -927,8 +932,6 @@ pub mod Selection {
             } else if slash_bond {
                 self.emit(BondSlashed { evaluation_id, requester, amount: bond_amount });
             }
-
-            self._finalize_cleanup(evaluation_id);
 
             self.reentrancyguard.end();
         }
@@ -1168,6 +1171,10 @@ pub mod Selection {
 
         fn get_stake_evaluation_count(self: @ContractState, stake_id: u256) -> u32 {
             self.stake_evaluation_count.entry(stake_id).read()
+        }
+
+        fn get_stake_finalized_count(self: @ContractState, stake_id: u256) -> u32 {
+            self.stake_finalized_count.entry(stake_id).read()
         }
 
         fn get_juror_locked_stake(self: @ContractState, juror: ContractAddress) -> u256 {
@@ -1442,25 +1449,6 @@ pub mod Selection {
                         retired: new_amount == 0 || stake.retired,
                     },
                 );
-        }
-
-        fn _finalize_cleanup(ref self: ContractState, evaluation_id: u256) {
-            let applied_count = self.evaluation_applied_count.entry(evaluation_id).read();
-            let mut i: u32 = 0;
-            loop {
-                if i >= applied_count {
-                    break;
-                }
-                let stake_id = self.evaluation_applied_stakes.entry((evaluation_id, i)).read();
-                if stake_id != 0 {
-                    self.stake_applied_to_eval.entry((stake_id, evaluation_id)).write(false);
-                    let current = self.stake_evaluation_count.entry(stake_id).read();
-                    if current > 0 {
-                        self.stake_evaluation_count.entry(stake_id).write(current - 1);
-                    }
-                }
-                i += 1;
-            };
         }
     }
 }

@@ -92,6 +92,7 @@ pub trait ISelection<TContractState> {
     fn get_juror_stake_ids(self: @TContractState, juror: ContractAddress) -> Array<u256>;
     fn total_stake_weight(self: @TContractState) -> u256;
     fn get_stake_evaluation_count(self: @TContractState, stake_id: u256) -> u32;
+    fn get_stake_finalized_count(self: @TContractState, stake_id: u256) -> u32;
     fn get_juror_locked_stake(self: @TContractState, juror: ContractAddress) -> u256;
     fn get_juror_unlocked_stake(self: @TContractState, juror: ContractAddress) -> u256;
     fn get_juror_open_evaluation_count(self: @TContractState, juror: ContractAddress) -> u32;

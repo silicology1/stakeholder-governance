@@ -13,6 +13,7 @@ use openzeppelin_interfaces::erc20::{IERC20Dispatcher, IERC20DispatcherTrait};
 use snforge_std::{
     CheatSpan, ContractClassTrait, DeclareResultTrait, cheat_caller_address, declare,
     start_cheat_block_timestamp_global, start_cheat_caller_address, start_mock_call,
+    stop_cheat_caller_address,
 };
 use stakeholder_governance_modular::interfaces::iadmin_timelock::{
     IAdminTimelockDispatcher, IAdminTimelockDispatcherTrait,
@@ -604,4 +605,190 @@ fn test_stake_below_new_minimum_reverts() {
     tok.approve(juror(), ONE);
     start_cheat_caller_address(fx.selection, juror());
     sel_disp(fx).create_stake(ONE);
+}
+
+// ////////////////////////////////////////////////////////////////
+//   FINALIZED-EVALUATION PULL RELEASE + LIFETIME CAP (no auto cleanup)
+// ////////////////////////////////////////////////////////////////
+
+/// Drives one evaluation through APPLING -> DRAWING -> COMMIT -> REVEAL ->
+/// FINALIZED with no reveals (zero-score refund path) and returns the fixture,
+/// the evaluation id and the applied stake ids.
+fn drive_finalized_dispute() -> (Fixture, u256, Array<u256>) {
+    let fx = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
+    let tok = tok_disp(fx);
+
+    start_cheat_block_timestamp_global(T0);
+    fund(fx, juror(), FUND * 16);
+    fund(fx, candidate(), FUND);
+
+    cheat1(fx.token, juror());
+    tok.approve(juror(), STAKE * 15);
+    start_cheat_caller_address(fx.selection, juror());
+    let mut stake_ids: Array<u256> = array![];
+    let mut i: u32 = 0;
+    loop {
+        if i >= 15 {
+            break;
+        }
+        let sid = sel_disp(fx).create_stake(STAKE);
+        stake_ids.append(sid);
+        i += 1;
+    }
+
+    cheat1(fx.token, candidate());
+    tok.approve(candidate(), BOND);
+    start_cheat_caller_address(fx.selection, candidate());
+    let dispute_id = sel_disp(fx).request_evaluation("evidence");
+
+    start_cheat_caller_address(fx.selection, juror());
+    let mut j: u32 = 0;
+    loop {
+        if j >= 15 {
+            break;
+        }
+        sel_disp(fx).apply_to_evaluation(dispute_id, *stake_ids.at(j));
+        j += 1;
+    }
+
+    const APPLY_DURATION: u64 = 259_200;
+    start_cheat_block_timestamp_global(T0 + APPLY_DURATION + 1);
+    sel_disp(fx).advance_evaluation(dispute_id);
+
+    sel_disp(fx).draw_jurors(dispute_id);
+
+    start_cheat_block_timestamp_global(T0 + APPLY_DURATION + 1 + COMMIT_DURATION + 1);
+    sel_disp(fx).advance_evaluation(dispute_id);
+
+    start_cheat_block_timestamp_global(
+        T0 + APPLY_DURATION + 1 + COMMIT_DURATION + 1 + REVEAL_DURATION + 1,
+    );
+    sel_disp(fx).finalize_evaluation(dispute_id);
+
+    (fx, dispute_id, stake_ids)
+}
+
+/// After finalize there is no auto-cleanup: the stake stays locked for this
+/// evaluation until the owner pulls it, the pull counts toward the lifetime
+/// finalized cap, and a full unstake then succeeds (stake retired).
+#[test]
+fn test_finalized_pull_releases_and_unlocks() {
+    let (fx, dispute_id, stake_ids) = drive_finalized_dispute();
+    let sel = sel_disp(fx);
+
+    let sid0 = *stake_ids.at(0);
+
+    // finalized but not yet pulled -> still locked
+    assert(sel.get_stake_evaluation_count(sid0) == 1, 'still locked, not pulled');
+    assert(sel.get_stake_finalized_count(sid0) == 0, 'lifetime counted too early');
+
+    // owner pull from the FINALIZED evaluation
+    start_cheat_caller_address(fx.selection, juror());
+    sel.remove_from_evaluation(dispute_id, sid0);
+
+    assert(sel.get_stake_evaluation_count(sid0) == 0, 'pull did not release');
+    assert(sel.get_stake_finalized_count(sid0) == 1, 'lifetime not counted');
+
+    // full unstake now succeeds and the stake is retired -> new stake id needed
+    sel.unstake_stake(sid0, STAKE);
+    let stake = sel.get_stake(sid0);
+    assert(stake.retired, 'stake should be retired');
+}
+
+/// Double pull from the same finalized evaluation reverts.
+#[test]
+#[should_panic(expected: ('NotApplied',))]
+fn test_finalized_double_pull_reverts() {
+    let (fx, dispute_id, stake_ids) = drive_finalized_dispute();
+    let sel = sel_disp(fx);
+
+    start_cheat_caller_address(fx.selection, juror());
+    let sid0 = *stake_ids.at(0);
+    sel.remove_from_evaluation(dispute_id, sid0);
+    sel.remove_from_evaluation(dispute_id, sid0);
+}
+
+/// With max_evaluations_per_stake = 1, one finalized participation is the
+/// stake's lifetime limit: after the pull, applying again reverts even though
+/// nothing is concurrently locked.
+#[test]
+#[should_panic(expected: ('StakeFinalizedLimitReached',))]
+fn test_finalized_lifetime_cap_blocks_apply() {
+    let (fx, dispute_id, stake_ids) = drive_finalized_dispute();
+    let tok = tok_disp(fx);
+    let atl = atl_disp(fx);
+    let sel = sel_disp(fx);
+
+    // clear the lingering caller cheat from the drive helper, else the
+    // timelock's nested call into selection sees the wrong caller
+    stop_cheat_caller_address(fx.selection);
+
+    // shrink the (timelock-governed) cap to 1
+    start_cheat_caller_address(fx.timelock, admin());
+    atl.propose_set_max_evaluations_per_stake(1);
+    let exec_ts = T0 + 259_200 + 1 + COMMIT_DURATION + 1 + REVEAL_DURATION + 1;
+    start_cheat_block_timestamp_global(exec_ts + TIMELOCK_DURATION);
+    atl.execute_set_max_evaluations_per_stake();
+    assert(sel.get_max_evaluations_per_stake() == 1, 'cap not applied');
+
+    // pull the stake out of the finalized evaluation: lifetime = 1
+    start_cheat_caller_address(fx.selection, juror());
+    let sid0 = *stake_ids.at(0);
+    sel.remove_from_evaluation(dispute_id, sid0);
+    assert(sel.get_stake_finalized_count(sid0) == 1, 'lifetime not counted');
+
+    // new evaluation by the same candidate, after the cooldown
+    const APPLY_DURATION: u64 = 259_200;
+    const COOLDOWN: u64 = 5_184_000;
+    cheat1(fx.token, candidate());
+    tok.approve(candidate(), BOND);
+    start_cheat_caller_address(fx.selection, candidate());
+    let ts2 = T0 + APPLY_DURATION + 1 + COMMIT_DURATION + 1 + REVEAL_DURATION + 1 + COOLDOWN;
+    start_cheat_block_timestamp_global(ts2);
+    let dispute_id2 = sel_disp(fx).request_evaluation("evidence again");
+
+    // the spent stake_id can never apply again
+    start_cheat_caller_address(fx.selection, juror());
+    sel.apply_to_evaluation(dispute_id2, sid0);
+}
+
+/// The required path after the cap: pull -> fully unstake -> restake -> the
+/// NEW stake id has fresh counters and can apply again.
+#[test]
+fn test_restake_with_new_stake_id_succeeds() {
+    let (fx, dispute_id, stake_ids) = drive_finalized_dispute();
+    let sel = sel_disp(fx);
+    let tok = tok_disp(fx);
+
+    start_cheat_caller_address(fx.selection, juror());
+    let sid0 = *stake_ids.at(0);
+    sel.remove_from_evaluation(dispute_id, sid0);
+
+    const APPLY_DURATION: u64 = 259_200;
+    const COOLDOWN: u64 = 5_184_000;
+
+    // fully unstake the spent stake id
+    sel.unstake_stake(sid0, STAKE);
+    let old = sel.get_stake(sid0);
+    assert(old.retired, 'old stake should be retired');
+
+    // restake as a brand new stake id
+    tok.approve(juror(), STAKE);
+    let new_sid = sel.create_stake(STAKE);
+    assert(new_sid != sid0, 'stake id should differ');
+    assert(sel.get_stake_finalized_count(new_sid) == 0, 'fresh lifetime not zero');
+
+    // candidate re-requests after the cooldown and the new stake applies
+    cheat1(fx.token, candidate());
+    tok.approve(candidate(), BOND);
+    start_cheat_caller_address(fx.selection, candidate());
+    let ts2 = T0 + APPLY_DURATION + 1 + COMMIT_DURATION + 1 + REVEAL_DURATION + 1 + COOLDOWN;
+    start_cheat_block_timestamp_global(ts2);
+    let dispute_id2 = sel_disp(fx).request_evaluation("evidence again");
+
+    start_cheat_caller_address(fx.selection, juror());
+    sel.apply_to_evaluation(dispute_id2, new_sid);
+
+    assert(sel.get_stake_evaluation_count(new_sid) == 1, 'new stake not applied');
+    assert(sel.get_stake_finalized_count(new_sid) == 0, 'lifetime polluted');
 }
