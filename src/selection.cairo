@@ -625,10 +625,8 @@ pub mod Selection {
                 'AlreadyRevealed',
             );
 
-            let mut hash_input: Array<felt252> = ArrayTrait::new();
-            hash_input.append(score.try_into().unwrap_or(0));
-            hash_input.append(salt);
-            let computed = poseidon_hash_span(hash_input.span());
+            let computed = self
+                ._compute_commit_hash(evaluation_id, stake_id, caller, score, salt);
             let stored = self.evaluation_commit.entry((evaluation_id, stake_id)).read();
             assert(computed == stored, 'HashMismatch');
 
@@ -1177,6 +1175,10 @@ pub mod Selection {
             self.stake_finalized_count.entry(stake_id).read()
         }
 
+        fn get_is_stake_drawn(self: @ContractState, evaluation_id: u256, stake_id: u256) -> bool {
+            self.evaluation_is_drawn.entry((evaluation_id, stake_id)).read()
+        }
+
         fn get_juror_locked_stake(self: @ContractState, juror: ContractAddress) -> u256 {
             let count = self.juror_stake_count.entry(juror).read();
             let mut total: u256 = 0;
@@ -1432,6 +1434,22 @@ pub mod Selection {
 
         fn _is_stake_drawn(self: @ContractState, evaluation_id: u256, stake_id: u256) -> bool {
             self.evaluation_is_drawn.entry((evaluation_id, stake_id)).read()
+        }
+
+        /// Commitment is bound to the exact (evaluation, stake, juror) triple at
+        /// reveal time, so a copied commitment cannot be redeemed by another
+        /// juror or another stake.
+        fn _compute_commit_hash(
+            self: @ContractState, evaluation_id: u256, stake_id: u256, caller: ContractAddress,
+            score: i8, salt: felt252,
+        ) -> felt252 {
+            let mut input: Array<felt252> = ArrayTrait::new();
+            input.append(evaluation_id.try_into().unwrap());
+            input.append(stake_id.try_into().unwrap());
+            input.append(caller.try_into().unwrap());
+            input.append(score.try_into().unwrap_or(0));
+            input.append(salt);
+            poseidon_hash_span(input.span())
         }
 
         fn _apply_stake_slash(ref self: ContractState, stake_id: u256, amount: u256) {

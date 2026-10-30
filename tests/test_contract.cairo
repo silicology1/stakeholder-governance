@@ -202,15 +202,21 @@ fn request_evaluation(fx: Fixture) -> u256 {
 fn commit_and_reveal(fx: Fixture, dispute_id: u256, score: i8) {
     let salt: felt252 = 0xbeef;
     let mut hash_input: Array<felt252> = array![];
+    // must mirror Selection::_compute_commit_hash: (evaluation, stake, juror, score, salt)
+    hash_input.append(dispute_id.try_into().unwrap());
+    hash_input.append((0_u256).try_into().unwrap());
+    hash_input.append(juror().try_into().unwrap());
     hash_input.append(score.into());
     hash_input.append(salt);
     let commit_hash = poseidon_hash_span(hash_input.span());
     start_cheat_caller_address(fx.selection, juror());
     sel_disp(fx).commit_vote(dispute_id, 0, commit_hash);
 
-    // Reveal after commit deadline
+    // Advance COMMIT -> REVEAL at the commit deadline (sets reveal_deadline)
     const APPLY_DURATION: u64 = 259_200;
-    start_cheat_block_timestamp_global(T0 + APPLY_DURATION + 1 + COMMIT_DURATION + 1);
+    start_cheat_block_timestamp_global(T0 + APPLY_DURATION + 1 + COMMIT_DURATION);
+    sel_disp(fx).advance_evaluation(dispute_id);
+
     sel_disp(fx).reveal_vote(dispute_id, 0, score, salt);
 }
 
@@ -605,6 +611,108 @@ fn test_stake_below_new_minimum_reverts() {
     tok.approve(juror(), ONE);
     start_cheat_caller_address(fx.selection, juror());
     sel_disp(fx).create_stake(ONE);
+}
+
+/// M-4 regression: a commitment copied into another drawn stake cannot be
+/// redeemed by that stake — the reveal preimage is bound to
+/// (evaluation, stake, juror, score, salt). Two drawn stakes (picked via the
+/// `get_is_stake_drawn` view) are committed by the same juror: the honest
+/// stake with the correct preimage, the second with the identical raw
+/// commitment value (the copy attack). The honest reveal succeeds; the copied
+/// one reverts.
+#[test]
+#[should_panic(expected: ('HashMismatch',))]
+fn test_copied_commitment_cannot_reveal() {
+    let fx = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
+    let tok = tok_disp(fx);
+    let sel = sel_disp(fx);
+
+    start_cheat_block_timestamp_global(T0);
+    fund(fx, juror(), FUND * 16);
+    fund(fx, candidate(), FUND);
+
+    cheat1(fx.token, juror());
+    tok.approve(juror(), STAKE * 15);
+    start_cheat_caller_address(fx.selection, juror());
+    let mut stake_ids: Array<u256> = array![];
+    let mut i: u32 = 0;
+    loop {
+        if i >= 15 {
+            break;
+        }
+        let sid = sel_disp(fx).create_stake(STAKE);
+        stake_ids.append(sid);
+        i += 1;
+    }
+
+    cheat1(fx.token, candidate());
+    tok.approve(candidate(), BOND);
+    start_cheat_caller_address(fx.selection, candidate());
+    let dispute_id = sel_disp(fx).request_evaluation("evidence");
+
+    start_cheat_caller_address(fx.selection, juror());
+    let mut j: u32 = 0;
+    loop {
+        if j >= 15 {
+            break;
+        }
+        sel_disp(fx).apply_to_evaluation(dispute_id, *stake_ids.at(j));
+        j += 1;
+    }
+
+    const APPLY_DURATION: u64 = 259_200;
+    start_cheat_block_timestamp_global(T0 + APPLY_DURATION + 1);
+    sel_disp(fx).advance_evaluation(dispute_id);
+
+    // draws min_jurors and auto-advances to COMMIT
+    sel_disp(fx).draw_jurors(dispute_id);
+
+    // find two drawn stakes (mock VRF draws a fixed subset)
+    let mut sid_a: u256 = 0;
+    let mut sid_b: u256 = 0;
+    let mut found: u32 = 0;
+    let mut k: u32 = 0;
+    loop {
+        if found >= 2 || k >= 15 {
+            break;
+        }
+        let sid = *stake_ids.at(k);
+        if sel.get_is_stake_drawn(dispute_id, sid) {
+            if found == 0 {
+                sid_a = sid;
+            } else {
+                sid_b = sid;
+            }
+            found += 1;
+        }
+        k += 1;
+    }
+    assert(found == 2, 'need two drawn stakes');
+
+    const SCORE: i8 = 3;
+    const SALT: felt252 = 0xbeef;
+    // honest commitment: exact preimage (evaluation, stake, juror, score, salt)
+    let mut honest: Array<felt252> = array![];
+    honest.append(dispute_id.try_into().unwrap());
+    honest.append(sid_a.try_into().unwrap());
+    honest.append(juror().try_into().unwrap());
+    honest.append(SCORE.into());
+    honest.append(SALT);
+    let commit_hash = poseidon_hash_span(honest.span());
+
+    start_cheat_caller_address(fx.selection, juror());
+    sel.commit_vote(dispute_id, sid_a, commit_hash);
+    // juror copies the raw commitment value into another drawn stake
+    sel.commit_vote(dispute_id, sid_b, commit_hash);
+
+    // Advance COMMIT -> REVEAL at the commit deadline (sets reveal_deadline)
+    start_cheat_block_timestamp_global(T0 + APPLY_DURATION + 1 + COMMIT_DURATION);
+    sel.advance_evaluation(dispute_id);
+
+    sel.reveal_vote(dispute_id, sid_a, SCORE, SALT);
+
+    // the copied commitment mechanically recycles the same score/salt...
+    sel.reveal_vote(dispute_id, sid_b, SCORE, SALT);
 }
 
 // ////////////////////////////////////////////////////////////////
