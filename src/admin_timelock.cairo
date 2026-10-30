@@ -361,6 +361,47 @@ pub mod AdminTimelock {
             self.reentrancyguard.end();
         }
 
+        fn propose_set_slashing_duration(ref self: ContractState, duration: u64) {
+            self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
+            assert(duration > 0, 'InvalidDuration');
+            let effective_at = get_block_timestamp() + TIMELOCK_DURATION;
+            self
+                .pending_changes
+                .entry((self.selection.read(), PARAM_SLASHING_DURATION))
+                .write(PendingChange { new_value: duration.into(), effective_at, exists: true });
+            self
+                .emit(
+                    ChangeProposed {
+                        target: self.selection.read(),
+                        param_key: PARAM_SLASHING_DURATION,
+                        new_value: duration.into(),
+                        effective_at,
+                    },
+                );
+        }
+
+        fn execute_set_slashing_duration(ref self: ContractState) {
+            self.reentrancyguard.start();
+            self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
+            let target = self.selection.read();
+            let pc = self.pending_changes.entry((target, PARAM_SLASHING_DURATION)).read();
+            assert(pc.exists, 'NoPendingChange');
+            assert(get_block_timestamp() >= pc.effective_at, 'TimelockNotElapsed');
+            self
+                .pending_changes
+                .entry((target, PARAM_SLASHING_DURATION))
+                .write(PendingChange { new_value: 0, effective_at: 0, exists: false });
+            ISelectionDispatcher { contract_address: target }
+                .execute_set_slashing_duration(pc.new_value.try_into().unwrap());
+            self
+                .emit(
+                    ChangeExecuted {
+                        target, param_key: PARAM_SLASHING_DURATION, new_value: pc.new_value,
+                    },
+                );
+            self.reentrancyguard.end();
+        }
+
         fn propose_set_non_reveal_slash_bps(ref self: ContractState, bps: u16) {
             self.accesscontrol.assert_only_role(DEFAULT_ADMIN_ROLE);
             assert(bps <= 10_000, 'TooHigh');

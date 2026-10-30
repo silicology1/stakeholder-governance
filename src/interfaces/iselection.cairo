@@ -69,6 +69,7 @@ pub trait ISelection<TContractState> {
     fn execute_set_evaluation_bond_amount(ref self: TContractState, amount: u256);
     fn execute_set_commit_duration(ref self: TContractState, duration: u64);
     fn execute_set_reveal_duration(ref self: TContractState, duration: u64);
+    fn execute_set_slashing_duration(ref self: TContractState, duration: u64);
     fn execute_set_non_reveal_slash_bps(ref self: TContractState, bps: u16);
     fn execute_set_incoherence_slash_bps(ref self: TContractState, bps: u16);
     fn execute_set_coherence_band(ref self: TContractState, band: u8);
@@ -111,6 +112,7 @@ pub trait ISelection<TContractState> {
     fn get_coherence_band(self: @TContractState) -> u8;
     fn get_commit_duration(self: @TContractState) -> u64;
     fn get_reveal_duration(self: @TContractState) -> u64;
+    fn get_slashing_duration(self: @TContractState) -> u64;
     fn get_non_reveal_slash_bps(self: @TContractState) -> u16;
     fn get_applying_duration(self: @TContractState) -> u64;
     fn get_min_stake_ids(self: @TContractState) -> u32;

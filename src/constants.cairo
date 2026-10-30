@@ -28,6 +28,8 @@ pub const BPS_DENOM: u256 = 10_000;
 pub const DEFAULT_COMMIT_DURATION: u64 = 259_200;
 /// Default duration of the reveal phase in seconds (three days).
 pub const DEFAULT_REVEAL_DURATION: u64 = 259_200;
+/// Default duration of the slash phase in seconds (twelve hours).
+pub const DEFAULT_SLASHING_DURATION: u64 = 43_200;
 
 /// Number of seconds in one hour, used by hourly governance-grant decay.
 pub const SECONDS_PER_HOUR: u64 = 3_600;
@@ -128,6 +130,8 @@ pub const PARAM_VRF_PROVIDER: felt252 = 'VRF_PROVIDER';
 pub const PARAM_COMMIT_DURATION: felt252 = 'COMMIT_DURATION';
 /// Storage key for the reveal-phase duration.
 pub const PARAM_REVEAL_DURATION: felt252 = 'REVEAL_DURATION';
+/// Storage key for the slash-phase duration.
+pub const PARAM_SLASHING_DURATION: felt252 = 'SLASH_DURATION';
 /// Storage key for the non-reveal slash rate.
 pub const PARAM_NON_REVEAL_SLASH_BPS: felt252 = 'NON_REVEAL_SLASH_BPS';
 /// Storage key for the incoherence slash rate.
@@ -167,6 +171,8 @@ pub const PHASE_REVEAL: u8 = 4;
 pub const PHASE_FINALIZED: u8 = 5;
 /// Evaluation was dismissed (minimum jurors not reached).
 pub const PHASE_DISMISSED: u8 = 6;
+/// Reveal ended; non-revealing drawn jurors may be slashed before finalization.
+pub const PHASE_SLASH: u8 = 7;
 
 // ---- Applying phase ----
 

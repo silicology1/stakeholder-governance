@@ -15,7 +15,7 @@ pub struct Dispute {
     pub commit_deadline: u64,
     /// Timestamp at which vote reveals must be submitted.
     pub reveal_deadline: u64,
-    /// One of `PHASE_COMMIT`, `PHASE_REVEAL`, or `PHASE_FINALIZED`.
+    /// One of `PHASE_COMMIT`, `PHASE_REVEAL`, `PHASE_SLASH`, or `PHASE_FINALIZED`; see `Evaluation`.
     pub phase: u8,
     /// Final trimmed-mean score in the inclusive range -5 through 5; meaningful after finalization.
     pub final_score: i64,
@@ -73,7 +73,7 @@ pub struct Evaluation {
     /// Evaluation bond escrowed for the request.
     pub bond_amount: u256,
     /// One of `PHASE_APPLYING`, `PHASE_DRAWING`, `PHASE_COMMIT`,
-    /// `PHASE_REVEAL`, `PHASE_FINALIZED`, `PHASE_DISMISSED`.
+    /// `PHASE_REVEAL`, `PHASE_SLASH`, `PHASE_FINALIZED`, `PHASE_DISMISSED`.
     pub phase: u8,
     /// Timestamp at which the applying phase ends.
     pub apply_deadline: u64,
@@ -83,6 +83,8 @@ pub struct Evaluation {
     pub commit_deadline: u64,
     /// Timestamp at which the reveal phase ends.
     pub reveal_deadline: u64,
+    /// Timestamp at which the slash phase ends (finalization gate).
+    pub slash_deadline: u64,
     /// Number of stake IDs currently applied to this evaluation.
     pub applied_count: u32,
     /// Number of stake IDs drawn for this evaluation.

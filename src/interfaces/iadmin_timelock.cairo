@@ -18,6 +18,8 @@ pub trait IAdminTimelock<TContractState> {
 
     fn propose_set_reveal_duration(ref self: TContractState, duration: u64);
     fn execute_set_reveal_duration(ref self: TContractState);
+    fn propose_set_slashing_duration(ref self: TContractState, duration: u64);
+    fn execute_set_slashing_duration(ref self: TContractState);
 
     fn propose_set_non_reveal_slash_bps(ref self: TContractState, bps: u16);
     fn execute_set_non_reveal_slash_bps(ref self: TContractState);

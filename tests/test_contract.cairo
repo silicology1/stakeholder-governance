@@ -15,6 +15,7 @@ use snforge_std::{
     start_cheat_block_timestamp_global, start_cheat_caller_address, start_mock_call,
     stop_cheat_caller_address,
 };
+use stakeholder_governance_modular::constants::{PHASE_SLASH};
 use stakeholder_governance_modular::interfaces::iadmin_timelock::{
     IAdminTimelockDispatcher, IAdminTimelockDispatcherTrait,
 };
@@ -222,8 +223,13 @@ fn commit_and_reveal(fx: Fixture, dispute_id: u256, score: i8) {
 
 fn finalize(fx: Fixture, dispute_id: u256) {
     const APPLY_DURATION: u64 = 259_200;
+    const SLASHING_DURATION: u64 = 43_200;
     start_cheat_block_timestamp_global(
         T0 + APPLY_DURATION + 1 + COMMIT_DURATION + REVEAL_DURATION + 1,
+    );
+    sel_disp(fx).advance_evaluation(dispute_id); // REVEAL -> SLASH
+    start_cheat_block_timestamp_global(
+        T0 + APPLY_DURATION + 1 + COMMIT_DURATION + REVEAL_DURATION + 1 + SLASHING_DURATION,
     );
     sel_disp(fx).finalize_evaluation(dispute_id);
 }
@@ -472,8 +478,15 @@ fn test_zero_reveal_refunds_bond() {
     start_cheat_block_timestamp_global(T0 + APPLY_DURATION + 1 + COMMIT_DURATION + 1);
     sel_disp(fx).advance_evaluation(dispute_id);
 
-    // Advance past reveal deadline -> eligible for finalization
+    // Advance past reveal deadline -> enter the SLASH phase
     start_cheat_block_timestamp_global(T0 + APPLY_DURATION + 1 + COMMIT_DURATION + 1 + REVEAL_DURATION + 1);
+    sel_disp(fx).advance_evaluation(dispute_id);
+
+    // wait out the slash window -> eligible for finalization
+    const SLASHING_DURATION: u64 = 43_200;
+    start_cheat_block_timestamp_global(
+        T0 + APPLY_DURATION + 1 + COMMIT_DURATION + 1 + REVEAL_DURATION + 1 + SLASHING_DURATION,
+    );
     sel_disp(fx).finalize_evaluation(dispute_id);
 
     let d = sel.get_dispute(dispute_id);
@@ -720,9 +733,9 @@ fn test_copied_commitment_cannot_reveal() {
 // ////////////////////////////////////////////////////////////////
 
 /// Drives one evaluation through APPLING -> DRAWING -> COMMIT -> REVEAL ->
-/// FINALIZED with no reveals (zero-score refund path) and returns the fixture,
-/// the evaluation id and the applied stake ids.
-fn drive_finalized_dispute() -> (Fixture, u256, Array<u256>) {
+/// SLASH (zero-score path, no reveals) and returns the fixture, the
+/// evaluation id and the applied stake ids. Finalization is NOT executed.
+fn drive_to_slash_window_end() -> (Fixture, u256, Array<u256>) {
     let fx = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
     let tok = tok_disp(fx);
 
@@ -771,8 +784,21 @@ fn drive_finalized_dispute() -> (Fixture, u256, Array<u256>) {
     start_cheat_block_timestamp_global(
         T0 + APPLY_DURATION + 1 + COMMIT_DURATION + 1 + REVEAL_DURATION + 1,
     );
-    sel_disp(fx).finalize_evaluation(dispute_id);
+    sel_disp(fx).advance_evaluation(dispute_id); // REVEAL -> SLASH
 
+    (fx, dispute_id, stake_ids)
+}
+
+/// Finalizes after the slash window: drives to SLASH, waits out
+/// `slashing_duration`, then executes finalize_evaluation.
+fn drive_finalized_dispute() -> (Fixture, u256, Array<u256>) {
+    const APPLY_DURATION: u64 = 259_200;
+    const SLASHING_DURATION: u64 = 43_200;
+    let (fx, dispute_id, stake_ids) = drive_to_slash_window_end();
+    start_cheat_block_timestamp_global(
+        T0 + APPLY_DURATION + 1 + COMMIT_DURATION + 1 + REVEAL_DURATION + 1 + SLASHING_DURATION,
+    );
+    sel_disp(fx).finalize_evaluation(dispute_id);
     (fx, dispute_id, stake_ids)
 }
 
@@ -834,7 +860,7 @@ fn test_finalized_lifetime_cap_blocks_apply() {
     // shrink the (timelock-governed) cap to 1
     start_cheat_caller_address(fx.timelock, admin());
     atl.propose_set_max_evaluations_per_stake(1);
-    let exec_ts = T0 + 259_200 + 1 + COMMIT_DURATION + 1 + REVEAL_DURATION + 1;
+    let exec_ts = T0 + 259_200 + 1 + COMMIT_DURATION + 1 + REVEAL_DURATION + 1 + 43_200;
     start_cheat_block_timestamp_global(exec_ts + TIMELOCK_DURATION);
     atl.execute_set_max_evaluations_per_stake();
     assert(sel.get_max_evaluations_per_stake() == 1, 'cap not applied');
@@ -851,7 +877,7 @@ fn test_finalized_lifetime_cap_blocks_apply() {
     cheat1(fx.token, candidate());
     tok.approve(candidate(), BOND);
     start_cheat_caller_address(fx.selection, candidate());
-    let ts2 = T0 + APPLY_DURATION + 1 + COMMIT_DURATION + 1 + REVEAL_DURATION + 1 + COOLDOWN;
+    let ts2 = T0 + APPLY_DURATION + 1 + COMMIT_DURATION + 1 + REVEAL_DURATION + 1 + 43_200 + COOLDOWN;
     start_cheat_block_timestamp_global(ts2);
     let dispute_id2 = sel_disp(fx).request_evaluation("evidence again");
 
@@ -890,7 +916,7 @@ fn test_restake_with_new_stake_id_succeeds() {
     cheat1(fx.token, candidate());
     tok.approve(candidate(), BOND);
     start_cheat_caller_address(fx.selection, candidate());
-    let ts2 = T0 + APPLY_DURATION + 1 + COMMIT_DURATION + 1 + REVEAL_DURATION + 1 + COOLDOWN;
+    let ts2 = T0 + APPLY_DURATION + 1 + COMMIT_DURATION + 1 + REVEAL_DURATION + 1 + 43_200 + COOLDOWN;
     start_cheat_block_timestamp_global(ts2);
     let dispute_id2 = sel_disp(fx).request_evaluation("evidence again");
 
@@ -899,4 +925,68 @@ fn test_restake_with_new_stake_id_succeeds() {
 
     assert(sel.get_stake_evaluation_count(new_sid) == 1, 'new stake not applied');
     assert(sel.get_stake_finalized_count(new_sid) == 0, 'lifetime polluted');
+}
+
+// ////////////////////////////////////////////////////////////////
+//      H-2: SLASH PHASE + ENFORCED SLASH ON FINALIZED PULL
+// ////////////////////////////////////////////////////////////////
+
+/// Finalization is blocked until the slash window has elapsed.
+#[test]
+#[should_panic(expected: ('SlashingStillOpen',))]
+fn test_finalize_before_slash_window_reverts() {
+    let (fx, dispute_id, _stake_ids) = drive_to_slash_window_end();
+    // we are inside the SLASH phase with the window still open
+    sel_disp(fx).finalize_evaluation(dispute_id);
+}
+
+/// The reveal phase ends into a dedicated SLASH phase whose duration is
+/// admin-configurable via the timelock; finalization resumes only after.
+#[test]
+fn test_reveal_advances_to_slash_phase() {
+    let (fx, dispute_id, _stake_ids) = drive_to_slash_window_end();
+    let eval = sel_disp(fx).get_evaluation(dispute_id);
+    assert(eval.phase == PHASE_SLASH, 'expected SLASH phase');
+    assert(eval.slash_deadline > eval.reveal_deadline, 'slash deadline not set');
+}
+
+/// A drawn juror that never reveals cannot dodge the slash by bundling
+/// finalize + pull + unstake: the finalized pull executes the non-reveal
+/// slash itself, then releases the stake.
+#[test]
+fn test_pull_enforces_non_reveal_slash() {
+    let (fx, dispute_id, stake_ids) = drive_finalized_dispute();
+    let sel = sel_disp(fx);
+
+    // pick a drawn stake; nobody reported it yet (no keeper slash)
+    let mut sid: u256 = 0;
+    let mut k: u32 = 0;
+    loop {
+        if k >= 15 {
+            break;
+        }
+        let cand = *stake_ids.at(k);
+        if sel.get_is_stake_drawn(dispute_id, cand) {
+            sid = cand;
+            k += 1;
+            break;
+        }
+        k += 1;
+    }
+    assert(sid != 0, 'no drawn stake found');
+    assert(sel.get_stake_slashed_total(sid, dispute_id) == 0_u256, 'slashed too early');
+
+    // the owner pulls straight into unstake (the 'multicall' path)
+    start_cheat_caller_address(fx.selection, juror());
+    sel.remove_from_evaluation(dispute_id, sid);
+
+    // the pull executed the 30% (DEFAULT_SLASH_BPS) non-reveal slash
+    let expected_slash = STAKE * (3_000_u256) / (10_000_u256);
+    let stake = sel.get_stake(sid);
+    assert(stake.amount == STAKE - expected_slash, 'slash not enforced on pull');
+    assert(sel.get_stake_slashed_total(sid, dispute_id) == expected_slash, 'not recorded');
+
+    // the remainder is now free to withdraw
+    sel.unstake_stake(sid, stake.amount);
+    assert(sel.get_stake(sid).retired, 'stake should be retired');
 }

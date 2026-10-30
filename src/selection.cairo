@@ -72,6 +72,7 @@ pub mod Selection {
         upgrades_disabled: bool,
         commit_duration: u64,
         reveal_duration: u64,
+        slashing_duration: u64,
         non_reveal_slash_bps: u16,
         incoherence_slash_bps: u16,
         coherence_band: u8,
@@ -175,6 +176,7 @@ pub mod Selection {
 
         self.commit_duration.write(DEFAULT_COMMIT_DURATION);
         self.reveal_duration.write(DEFAULT_REVEAL_DURATION);
+        self.slashing_duration.write(DEFAULT_SLASHING_DURATION);
         self.non_reveal_slash_bps.write(DEFAULT_SLASH_BPS);
         self.incoherence_slash_bps.write(DEFAULT_INCOHERENCE_SLASH_BPS);
         self.coherence_band.write(DEFAULT_COHERENCE_BAND);
@@ -286,6 +288,7 @@ pub mod Selection {
                 draw_deadline: 0,
                 commit_deadline: 0,
                 reveal_deadline: 0,
+                slash_deadline: 0,
                 applied_count: 0,
                 drawn_count: 0,
                 min_jurors: self.min_jurors_per_evaluation.read(),
@@ -414,6 +417,15 @@ pub mod Selection {
             self.evaluations.entry(evaluation_id).write(e);
             self.evaluation_applied_count.entry(evaluation_id).write(e.applied_count);
 
+            // finalized pull enforces the pending non-reveal slash before the
+            // stake is released, so an unrevealed juror cannot exit unslashed
+            if e.phase == PHASE_FINALIZED
+                && self.evaluation_is_drawn.entry((evaluation_id, stake_id)).read()
+                && !self.evaluation_revealed.entry((evaluation_id, stake_id)).read()
+                && !self.evaluation_slashed.entry((evaluation_id, stake_id)).read() {
+                self._slash_stake(evaluation_id, stake_id);
+            }
+
             self.stake_applied_to_eval.entry((stake_id, evaluation_id)).write(false);
             let current_count = self.stake_evaluation_count.entry(stake_id).read();
             assert(current_count > 0, 'CountUnderflow');
@@ -497,6 +509,13 @@ pub mod Selection {
                     self.reentrancyguard.end();
                     return;
                 }
+                // enter the dedicated slashing window before finalization
+                e.phase = PHASE_SLASH;
+                e.slash_deadline = now + self.slashing_duration.read();
+                self.evaluations.entry(evaluation_id).write(e);
+                self.emit(EvaluationAdvanced { evaluation_id, phase: PHASE_SLASH });
+            } else if e.phase == PHASE_SLASH {
+                //_past the slash window finalization is permitted; nothing to advance
             }
             self.reentrancyguard.end();
         }
@@ -641,51 +660,15 @@ pub mod Selection {
             self.reentrancyguard.start();
             let e = self.evaluations.entry(evaluation_id).read();
             assert(
-                e.phase == PHASE_REVEAL || e.phase == PHASE_FINALIZED,
+                e.phase == PHASE_REVEAL
+                || e.phase == PHASE_SLASH
+                || e.phase == PHASE_FINALIZED,
                 'WrongPhaseForSlash',
             );
             assert(e.reveal_deadline != 0, 'RevealNotStarted');
             assert(get_block_timestamp() >= e.reveal_deadline, 'RevealStillOpen');
 
-            assert(
-                self._is_stake_drawn(evaluation_id, stake_id),
-                'NotDrawnStake',
-            );
-            assert(!self.evaluation_revealed.entry((evaluation_id, stake_id)).read(), 'DidReveal');
-            assert(
-                !self.evaluation_slashed.entry((evaluation_id, stake_id)).read(), 'AlreadySlashed',
-            );
-
-            let stake = self.stakes.entry(stake_id).read();
-            let owner = stake.owner;
-            let bps: u256 = self.non_reveal_slash_bps.read().try_into().unwrap_or(0);
-            let slash_amount = stake.amount * bps / BPS_DENOM;
-
-            if slash_amount > 0 {
-                self._apply_stake_slash(stake_id, slash_amount);
-
-                let mut dm = self.evaluations.entry(evaluation_id).read();
-                dm.slash_pool += slash_amount;
-                self.evaluations.entry(evaluation_id).write(dm);
-
-                self.stake_slashed_total.entry((stake_id, evaluation_id)).write(slash_amount);
-            }
-
-            self.evaluation_slashed.entry((evaluation_id, stake_id)).write(true);
-
-            self.emit(JurorSlashed { evaluation_id, juror: owner, amount: slash_amount });
-
-            let caller = get_caller_address();
-            if caller != owner
-                && SLASH_KEEPER_REWARD > 0
-                && self._token().mint_from_budget(caller, SLASH_KEEPER_REWARD) {
-                self
-                    .emit(
-                        SlashKeeperRewarded {
-                            caller, juror: owner, evaluation_id, reward: SLASH_KEEPER_REWARD,
-                        },
-                    );
-            }
+            self._slash_stake(evaluation_id, stake_id);
 
             self.reentrancyguard.end();
         }
@@ -694,8 +677,8 @@ pub mod Selection {
             self.reentrancyguard.start();
             let mut e = self.evaluations.entry(evaluation_id).read();
             assert(!e.final_score_set, 'AlreadyFinalized');
-            assert(e.phase == PHASE_REVEAL, 'NotRevealPhase');
-            assert(get_block_timestamp() >= e.reveal_deadline, 'RevealStillOpen');
+            assert(e.phase == PHASE_SLASH, 'NotSlashingPhase');
+            assert(get_block_timestamp() >= e.slash_deadline, 'SlashingStillOpen');
 
             let drawn_count = e.drawn_count;
             let coherence_band: i64 = self.coherence_band.read().try_into().unwrap_or(1);
@@ -1019,6 +1002,11 @@ pub mod Selection {
             self.reveal_duration.write(duration);
         }
 
+        fn execute_set_slashing_duration(ref self: ContractState, duration: u64) {
+            self._assert_admin();
+            self.slashing_duration.write(duration);
+        }
+
         fn execute_set_non_reveal_slash_bps(ref self: ContractState, bps: u16) {
             self._assert_admin();
             self.non_reveal_slash_bps.write(bps);
@@ -1265,6 +1253,10 @@ pub mod Selection {
             self.reveal_duration.read()
         }
 
+        fn get_slashing_duration(self: @ContractState) -> u64 {
+            self.slashing_duration.read()
+        }
+
         fn get_non_reveal_slash_bps(self: @ContractState) -> u16 {
             self.non_reveal_slash_bps.read()
         }
@@ -1450,6 +1442,52 @@ pub mod Selection {
             input.append(score.try_into().unwrap_or(0));
             input.append(salt);
             poseidon_hash_span(input.span())
+        }
+
+        /// Executes the non-reveal slash for one drawn, unrevealed stake
+        /// (O(1)). Used by the permissionless keeper path and by the
+        /// finalized-evaluation pull, so an unrevealed juror can never exit
+        /// without paying the slash.
+        fn _slash_stake(ref self: ContractState, evaluation_id: u256, stake_id: u256) {
+            assert(
+                self._is_stake_drawn(evaluation_id, stake_id),
+                'NotDrawnStake',
+            );
+            assert(!self.evaluation_revealed.entry((evaluation_id, stake_id)).read(), 'DidReveal');
+            assert(
+                !self.evaluation_slashed.entry((evaluation_id, stake_id)).read(), 'AlreadySlashed',
+            );
+
+            let stake = self.stakes.entry(stake_id).read();
+            let owner = stake.owner;
+            let bps: u256 = self.non_reveal_slash_bps.read().try_into().unwrap_or(0);
+            let slash_amount = stake.amount * bps / BPS_DENOM;
+
+            if slash_amount > 0 {
+                self._apply_stake_slash(stake_id, slash_amount);
+
+                let mut dm = self.evaluations.entry(evaluation_id).read();
+                dm.slash_pool += slash_amount;
+                self.evaluations.entry(evaluation_id).write(dm);
+
+                self.stake_slashed_total.entry((stake_id, evaluation_id)).write(slash_amount);
+            }
+
+            self.evaluation_slashed.entry((evaluation_id, stake_id)).write(true);
+
+            self.emit(JurorSlashed { evaluation_id, juror: owner, amount: slash_amount });
+
+            let caller = get_caller_address();
+            if caller != owner
+                && SLASH_KEEPER_REWARD > 0
+                && self._token().mint_from_budget(caller, SLASH_KEEPER_REWARD) {
+                self
+                    .emit(
+                        SlashKeeperRewarded {
+                            caller, juror: owner, evaluation_id, reward: SLASH_KEEPER_REWARD,
+                        },
+                    );
+            }
         }
 
         fn _apply_stake_slash(ref self: ContractState, stake_id: u256, amount: u256) {
