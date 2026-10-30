@@ -100,6 +100,7 @@ pub mod Selection {
         evaluation_applied_count: Map<u256, u32>,
         evaluation_drawn_stakes: Map<(u256, u32), u256>,
         evaluation_draw_index: Map<u256, u32>,
+        evaluation_is_drawn: Map<(u256, u256), bool>,
         evaluation_commit: Map<(u256, u256), felt252>,
         evaluation_committed: Map<(u256, u256), bool>,
         evaluation_revealed: Map<(u256, u256), bool>,
@@ -367,21 +368,10 @@ pub mod Selection {
             );
 
             if e.phase == PHASE_COMMIT {
-                let drawn_count = e.drawn_count;
-                let mut is_drawn: bool = false;
-                let mut i: u32 = 0;
-                loop {
-                    if i >= drawn_count {
-                        break;
-                    }
-                    let drawn_id = self.evaluation_drawn_stakes.entry((evaluation_id, i)).read();
-                    if drawn_id == stake_id {
-                        is_drawn = true;
-                        break;
-                    }
-                    i += 1;
-                }
-                assert(!is_drawn, 'StakeDrawn');
+                assert(
+                    !self.evaluation_is_drawn.entry((evaluation_id, stake_id)).read(),
+                    'StakeDrawn',
+                );
             }
 
             let fenwick_index = self
@@ -554,6 +544,7 @@ pub mod Selection {
                 self.evaluation_index_to_stake.entry((evaluation_id, index)).write(0);
 
                 self.evaluation_drawn_stakes.entry((evaluation_id, drawn)).write(stake_id);
+                self.evaluation_is_drawn.entry((evaluation_id, stake_id)).write(true);
                 drawn += 1;
 
                 self
@@ -590,7 +581,7 @@ pub mod Selection {
             let stake = self.stakes.entry(stake_id).read();
             assert(stake.owner == caller, 'NotStakeOwner');
             assert(
-                self._is_stake_drawn(evaluation_id, stake_id, e.drawn_count),
+                self._is_stake_drawn(evaluation_id, stake_id),
                 'NotDrawnStake',
             );
             assert(
@@ -618,7 +609,7 @@ pub mod Selection {
             let stake = self.stakes.entry(stake_id).read();
             assert(stake.owner == caller, 'NotStakeOwner');
             assert(
-                self._is_stake_drawn(evaluation_id, stake_id, e.drawn_count),
+                self._is_stake_drawn(evaluation_id, stake_id),
                 'NotDrawnStake',
             );
             assert(self.evaluation_committed.entry((evaluation_id, stake_id)).read(), 'NoCommit');
@@ -652,7 +643,7 @@ pub mod Selection {
             assert(get_block_timestamp() >= e.reveal_deadline, 'RevealStillOpen');
 
             assert(
-                self._is_stake_drawn(evaluation_id, stake_id, e.drawn_count),
+                self._is_stake_drawn(evaluation_id, stake_id),
                 'NotDrawnStake',
             );
             assert(!self.evaluation_revealed.entry((evaluation_id, stake_id)).read(), 'DidReveal');
@@ -1432,21 +1423,8 @@ pub mod Selection {
             pos + 1
         }
 
-        fn _is_stake_drawn(
-            self: @ContractState, evaluation_id: u256, stake_id: u256, drawn_count: u32,
-        ) -> bool {
-            let mut i: u32 = 0;
-            loop {
-                if i >= drawn_count {
-                    break;
-                }
-                let drawn_id = self.evaluation_drawn_stakes.entry((evaluation_id, i)).read();
-                if drawn_id == stake_id {
-                    return true;
-                }
-                i += 1;
-            }
-            false
+        fn _is_stake_drawn(self: @ContractState, evaluation_id: u256, stake_id: u256) -> bool {
+            self.evaluation_is_drawn.entry((evaluation_id, stake_id)).read()
         }
 
         fn _apply_stake_slash(ref self: ContractState, stake_id: u256, amount: u256) {
