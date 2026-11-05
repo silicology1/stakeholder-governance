@@ -204,8 +204,10 @@ pub mod Selection {
 
             self._token().escrow(caller, amount);
 
-            let stake_id = self.stake_count.read();
-            self.stake_count.write(stake_id + 1);
+            // stake IDs are 1-based so that 0 keeps its role as the
+            // "no stake" sentinel in evaluation_index_to_stake
+            let stake_id = self.stake_count.read() + 1;
+            self.stake_count.write(stake_id);
 
             let stake = Stake {
                 owner: caller, amount, created_at: get_block_timestamp(), retired: false,
@@ -539,6 +541,7 @@ pub mod Selection {
 
             let mut drawn: u32 = e.drawn_count;
             let mut draw_idx: u32 = self.evaluation_draw_index.entry(evaluation_id).read();
+            let mut redraws: u32 = 0;
 
             loop {
                 if drawn >= min_jurors {
@@ -558,6 +561,13 @@ pub mod Selection {
                 let stake_id = self.evaluation_index_to_stake.entry((evaluation_id, index)).read();
 
                 if stake_id == 0 {
+                    // drawn onto an index with no stake behind it: redraw,
+                    // bounded by MAX_REDRAW_ATTEMPTS so the loop can never
+                    // spin unboundedly before running out of gas
+                    redraws += 1;
+                    if redraws >= MAX_REDRAW_ATTEMPTS {
+                        break;
+                    }
                     draw_idx += 1;
                     continue;
                 }
@@ -1143,9 +1153,9 @@ pub mod Selection {
         fn total_stake_weight(self: @ContractState) -> u256 {
             let mut total: u256 = 0;
             let count = self.stake_count.read();
-            let mut i: u256 = 0;
+            let mut i: u256 = 1;
             loop {
-                if i >= count {
+                if i > count {
                     break;
                 }
                 let stake = self.stakes.entry(i).read();

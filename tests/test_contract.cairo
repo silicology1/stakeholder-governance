@@ -15,7 +15,7 @@ use snforge_std::{
     start_cheat_block_timestamp_global, start_cheat_caller_address, start_mock_call,
     stop_cheat_caller_address,
 };
-use stakeholder_governance_modular::constants::{PHASE_SLASH};
+use stakeholder_governance_modular::constants::{PHASE_COMMIT, PHASE_SLASH};
 use stakeholder_governance_modular::interfaces::iadmin_timelock::{
     IAdminTimelockDispatcher, IAdminTimelockDispatcherTrait,
 };
@@ -200,25 +200,25 @@ fn request_evaluation(fx: Fixture) -> u256 {
     sel_disp(fx).request_evaluation("evidence")
 }
 
-fn commit_and_reveal(fx: Fixture, dispute_id: u256, score: i8) {
+fn commit_and_reveal(fx: Fixture, dispute_id: u256, stake_id: u256, score: i8) {
     let salt: felt252 = 0xbeef;
     let mut hash_input: Array<felt252> = array![];
     // must mirror Selection::_compute_commit_hash: (evaluation, stake, juror, score, salt)
     hash_input.append(dispute_id.try_into().unwrap());
-    hash_input.append((0_u256).try_into().unwrap());
+    hash_input.append(stake_id.try_into().unwrap());
     hash_input.append(juror().try_into().unwrap());
     hash_input.append(score.into());
     hash_input.append(salt);
     let commit_hash = poseidon_hash_span(hash_input.span());
     start_cheat_caller_address(fx.selection, juror());
-    sel_disp(fx).commit_vote(dispute_id, 0, commit_hash);
+    sel_disp(fx).commit_vote(dispute_id, stake_id, commit_hash);
 
     // Advance COMMIT -> REVEAL at the commit deadline (sets reveal_deadline)
     const APPLY_DURATION: u64 = 259_200;
     start_cheat_block_timestamp_global(T0 + APPLY_DURATION + 1 + COMMIT_DURATION);
     sel_disp(fx).advance_evaluation(dispute_id);
 
-    sel_disp(fx).reveal_vote(dispute_id, 0, score, salt);
+    sel_disp(fx).reveal_vote(dispute_id, stake_id, score, salt);
 }
 
 fn finalize(fx: Fixture, dispute_id: u256) {
@@ -276,8 +276,8 @@ fn evaluate(fx: Fixture, score: i8) -> u256 {
     // Draw jurors -> auto-advances to COMMIT
     sel_disp(fx).draw_jurors(dispute_id);
 
-    // Commit as stake_id 0
-    commit_and_reveal(fx, dispute_id, score);
+    // Commit with the juror's first stake
+    commit_and_reveal(fx, dispute_id, *stake_ids.at(0), score);
 
     // Finalize
     finalize(fx, dispute_id);
@@ -381,6 +381,7 @@ fn test_dismissal_gas_many_applied_stakes() {
 
     const JUROR_COUNT: u32 = 100;
 
+    let mut stake_ids: Array<u256> = array![];
     let mut index: u32 = 0;
     loop {
         if index >= JUROR_COUNT {
@@ -391,7 +392,8 @@ fn test_dismissal_gas_many_applied_stakes() {
         cheat1(fx.token, address);
         tok.approve(address, STAKE);
         start_cheat_caller_address(fx.selection, address);
-        sel.create_stake(STAKE);
+        let sid = sel.create_stake(STAKE);
+        stake_ids.append(sid);
         index += 1;
     }
 
@@ -407,7 +409,7 @@ fn test_dismissal_gas_many_applied_stakes() {
             break;
         }
         start_cheat_caller_address(fx.selection, juror_address(i));
-        sel.apply_to_evaluation(evaluation_id, i.into());
+        sel.apply_to_evaluation(evaluation_id, *stake_ids.at(i));
         i += 1;
     }
 
@@ -497,8 +499,54 @@ fn test_zero_reveal_refunds_bond() {
 }
 
 // ////////////////////////////////////////////////////////////////
-//              ADMIN TIMELOCK ENGINE
+//              STAKE ID 0 SENTINEL (H-3)
 // ////////////////////////////////////////////////////////////////
+
+/// Stake IDs are 1-based so that 0 keeps its role as the "no stake" sentinel
+/// in evaluation_index_to_stake. Regression: with 0-based IDs the first stake
+/// could never be drawn (its leaf was read as an empty miss), its Fenwick
+/// weight was never removed, and the redraw loop could spin until out of gas.
+#[test]
+fn test_first_stake_is_id_one_and_drawable() {
+    let fx = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
+    let sel = sel_disp(fx);
+    let atl = atl_disp(fx);
+
+    // Timelock-config: one applied stake and one juror suffice
+    start_cheat_block_timestamp_global(T0);
+    start_cheat_caller_address(fx.timelock, admin());
+    atl.propose_set_min_stake_ids(1);
+    atl.propose_set_min_jurors(1);
+    start_cheat_block_timestamp_global(T0 + TIMELOCK_DURATION + 1);
+    atl.execute_set_min_stake_ids();
+    atl.execute_set_min_jurors();
+    assert(sel.get_min_stake_ids() == 1, 'min ids not applied');
+    assert(sel.get_min_jurors() == 1, 'min jurors not applied');
+
+    // The very first stake ever issued gets ID 1
+    start_cheat_block_timestamp_global(T0);
+    fund(fx, juror(), FUND);
+    let sid = stake_juror(fx);
+    assert(sid == 1, 'first stake id must be 1');
+
+    // Single-stake evaluation -> DRAWING -> draw draws that lone juror
+    fund(fx, candidate(), FUND);
+    let dispute_id = request_evaluation(fx);
+
+    start_cheat_caller_address(fx.selection, juror());
+    sel.apply_to_evaluation(dispute_id, sid);
+
+    const APPLY_DURATION: u64 = 259_200;
+    start_cheat_block_timestamp_global(T0 + APPLY_DURATION + 1);
+    sel.advance_evaluation(dispute_id);
+
+    sel.draw_jurors(dispute_id);
+
+    let e = sel.get_evaluation(dispute_id);
+    assert(e.drawn_count == 1, 'lone stake not drawn');
+    assert(sel.get_is_stake_drawn(dispute_id, sid), 'drawn flag missing');
+    assert(e.phase == PHASE_COMMIT, 'did not advance to commit');
+}
 
 #[test]
 fn test_evaluation_bond_timelocked_change() {
@@ -823,8 +871,11 @@ fn test_finalized_pull_releases_and_unlocks() {
     assert(sel.get_stake_evaluation_count(sid0) == 0, 'pull did not release');
     assert(sel.get_stake_finalized_count(sid0) == 1, 'lifetime not counted');
 
-    // full unstake now succeeds and the stake is retired -> new stake id needed
-    sel.unstake_stake(sid0, STAKE);
+    // full unstake now succeeds and the stake is retired; note the pulled
+    // stake may have been drawn-and-not-revealed, so the pull first enforced
+    // the non-reveal slash -> unstake whatever amount remains
+    let remaining = sel.get_stake(sid0).amount;
+    sel.unstake_stake(sid0, remaining);
     let stake = sel.get_stake(sid0);
     assert(stake.retired, 'stake should be retired');
 }
@@ -901,8 +952,10 @@ fn test_restake_with_new_stake_id_succeeds() {
     const APPLY_DURATION: u64 = 259_200;
     const COOLDOWN: u64 = 5_184_000;
 
-    // fully unstake the spent stake id
-    sel.unstake_stake(sid0, STAKE);
+    // fully unstake the spent stake id (a pulled drawn stake may carry the
+    // enforced non-reveal slash, so unstake the remaining amount)
+    let remaining = sel.get_stake(sid0).amount;
+    sel.unstake_stake(sid0, remaining);
     let old = sel.get_stake(sid0);
     assert(old.retired, 'old stake should be retired');
 
