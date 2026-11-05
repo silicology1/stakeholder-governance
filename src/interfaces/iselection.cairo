@@ -59,9 +59,6 @@ pub trait ISelection<TContractState> {
     /// Claim a juror reward for a finalized evaluation.
     fn claim_juror_reward(ref self: TContractState, evaluation_id: u256, stake_id: u256);
 
-    /// Stakeholder: withdraw bond after evaluation finalized (only if score >= 0).
-    fn unstake_bond(ref self: TContractState, evaluation_id: u256);
-
     // ---- admin ----
 
     /// Executed by AdminTimelock after timelock to change Selection's admin.

@@ -1044,27 +1044,6 @@ pub mod Selection {
             self.reentrancyguard.end();
         }
 
-        fn unstake_bond(ref self: ContractState, evaluation_id: u256) {
-            self.reentrancyguard.start();
-            let caller = get_caller_address();
-            let mut e = self.evaluations.entry(evaluation_id).read();
-            assert(e.final_score_set, 'NotFinalized');
-            assert(e.requester == caller, 'NotRequester');
-            assert(!e.bond_settled, 'BondAlreadySettled');
-            assert(e.final_score >= 0, 'NegativeScore');
-
-            let bond_amount = e.bond_amount;
-            e.bond_settled = true;
-            self.evaluations.entry(evaluation_id).write(e);
-
-            if bond_amount > 0 {
-                self._token().release(caller, bond_amount);
-                self.emit(BondRefunded { evaluation_id, requester: caller, amount: bond_amount });
-            }
-
-            self.reentrancyguard.end();
-        }
-
         // ---- ADMIN - timelocked parameter changes (executed by AdminTimelock) ----
 
         fn execute_set_admin(ref self: ContractState, new_admin: ContractAddress) {
