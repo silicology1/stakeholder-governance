@@ -15,7 +15,7 @@ use snforge_std::{
     start_cheat_block_timestamp_global, start_cheat_caller_address, start_mock_call,
     stop_cheat_caller_address,
 };
-use stakeholder_governance_modular::constants::{PHASE_COMMIT, PHASE_SLASH};
+use stakeholder_governance_modular::constants::{PHASE_COMMIT, PHASE_DISMISSED, PHASE_DRAWING, PHASE_SLASH};
 use stakeholder_governance_modular::interfaces::iadmin_timelock::{
     IAdminTimelockDispatcher, IAdminTimelockDispatcherTrait,
 };
@@ -423,6 +423,175 @@ fn test_dismissal_gas_many_applied_stakes() {
 
     let e = sel.get_evaluation(evaluation_id);
     assert(e.phase == 6, 'evaluation should be dismissed');
+}
+
+// ////////////////////////////////////////////////////////////////
+//    M-3: FENWICK SLOT RECYCLING + REQUESTER CANCEL
+// ////////////////////////////////////////////////////////////////
+
+/// Removing a stake reclaims its Fenwick leaf slot and the next apply reuses
+/// it (LIFO), so apply/remove cycling no longer burns the 10,000 slots.
+#[test]
+fn test_fenwick_slot_reuse_after_removal() {
+    let fx = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
+    let sel = sel_disp(fx);
+    let tok = tok_disp(fx);
+
+    start_cheat_block_timestamp_global(T0);
+    fund(fx, juror(), FUND * 8);
+    fund(fx, candidate(), FUND);
+
+    cheat1(fx.token, juror());
+    tok.approve(juror(), STAKE * 3);
+    start_cheat_caller_address(fx.selection, juror());
+    let a = sel.create_stake(STAKE);
+    let b = sel.create_stake(STAKE);
+    let c = sel.create_stake(STAKE);
+
+    let dispute_id = request_evaluation(fx);
+
+    start_cheat_caller_address(fx.selection, juror());
+    sel.apply_to_evaluation(dispute_id, a);
+    sel.apply_to_evaluation(dispute_id, b);
+    sel.apply_to_evaluation(dispute_id, c);
+    assert(sel.get_evaluation_stake_index(dispute_id, a) == 1, 'slot a');
+    assert(sel.get_evaluation_stake_index(dispute_id, b) == 2, 'slot b');
+    assert(sel.get_evaluation_stake_index(dispute_id, c) == 3, 'slot c');
+
+    // remove b -> its slot must be recycled for the next apply
+    sel.remove_from_evaluation(dispute_id, b);
+    cheat1(fx.token, juror());
+    tok.approve(juror(), STAKE);
+    let d = sel.create_stake(STAKE);
+    start_cheat_caller_address(fx.selection, juror());
+    sel.apply_to_evaluation(dispute_id, d);
+    assert(sel.get_evaluation_stake_index(dispute_id, d) == 2, 'slot not recycled');
+
+    // LIFO: removing a pushes slot 1 on top of the stack
+    sel.remove_from_evaluation(dispute_id, a);
+    cheat1(fx.token, juror());
+    tok.approve(juror(), STAKE);
+    start_cheat_caller_address(fx.selection, juror());
+    let f = sel.create_stake(STAKE);
+    start_cheat_caller_address(fx.selection, juror());
+    let f_sid = f;
+    sel.apply_to_evaluation(dispute_id, f_sid);
+    assert(sel.get_evaluation_stake_index(dispute_id, f_sid) == 1, 'LIFO reuse order');
+}
+
+/// When `applied_count < min_stake_ids`, advance would extend the deadline
+/// forever; the requester cancels instead: phase dismissed, bond refunded,
+/// active-evaluation slot cleared, cooldown started. Applied stakes are
+/// released by owners through the regular remove path.
+#[test]
+fn test_requester_cancel_refunds_and_unlocks() {
+    let fx = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
+    let sel = sel_disp(fx);
+    let tok = tok_disp(fx);
+
+    start_cheat_block_timestamp_global(T0);
+    fund(fx, juror(), FUND * 2);
+    fund(fx, candidate(), FUND);
+
+    let sid = stake_juror(fx);
+    let bond_before = tok.balance_of(candidate());
+
+    let dispute_id = request_evaluation(fx);
+
+    start_cheat_caller_address(fx.selection, juror());
+    sel.apply_to_evaluation(dispute_id, sid);
+    assert(sel.get_stake_evaluation_count(sid) == 1, 'stake should be locked');
+
+    start_cheat_caller_address(fx.selection, candidate());
+    sel.cancel_evaluation(dispute_id);
+
+    let e = sel.get_evaluation(dispute_id);
+    assert(e.phase == PHASE_DISMISSED, 'phase should be dismissed');
+    assert(tok.balance_of(candidate()) == bond_before, 'bond not refunded');
+    assert(sel.get_last_evaluation_finalized(candidate()) > 0, 'cooldown not set');
+    assert(sel.get_active_evaluation_for_candidate(candidate()) == 0, 'active not cleared');
+
+    // the applied stake is released by its owner via the existing path
+    start_cheat_caller_address(fx.selection, juror());
+    sel.remove_from_evaluation(dispute_id, sid);
+    assert(sel.get_stake_evaluation_count(sid) == 0, 'stake still locked');
+
+    // with the slot recycled, the stake can be re-applied to a new evaluation
+    // (new eval needed because this one is terminal)
+    cheat1(fx.token, candidate());
+    tok.approve(candidate(), BOND);
+    start_cheat_caller_address(fx.selection, candidate());
+    let cd = sel.get_evaluation_cooldown();
+    start_cheat_block_timestamp_global(T0 + cd + 1);
+    let dispute2 = sel.request_evaluation("evidence 2");
+    start_cheat_caller_address(fx.selection, juror());
+    sel.apply_to_evaluation(dispute2, sid);
+    assert(sel.get_stake_evaluation_count(sid) == 1, 're-apply failed');
+}
+
+#[test]
+#[should_panic(expected: ('NotRequester',))]
+fn test_cancel_by_other_address_reverts() {
+    let fx = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
+    let sel = sel_disp(fx);
+
+    start_cheat_block_timestamp_global(T0);
+    fund(fx, candidate(), FUND);
+    let dispute_id = request_evaluation(fx);
+
+    start_cheat_caller_address(fx.selection, juror());
+    sel.cancel_evaluation(dispute_id);
+}
+
+#[test]
+#[should_panic(expected: ('NotApplyingPhase',))]
+fn test_cancel_in_drawing_phase_reverts() {
+    let fx = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
+    let sel = sel_disp(fx);
+    let atl = atl_disp(fx);
+
+    // timelock-config so reaching DRAWING needs only one applied stake
+    start_cheat_block_timestamp_global(T0);
+    start_cheat_caller_address(fx.timelock, admin());
+    atl.propose_set_min_stake_ids(1);
+    start_cheat_block_timestamp_global(T0 + TIMELOCK_DURATION + 1);
+    atl.execute_set_min_stake_ids();
+    assert(sel.get_min_stake_ids() == 1, 'min ids not applied');
+
+    start_cheat_block_timestamp_global(T0);
+    fund(fx, juror(), FUND);
+    fund(fx, candidate(), FUND);
+
+    let sid = stake_juror(fx);
+    let dispute_id = request_evaluation(fx);
+
+    start_cheat_caller_address(fx.selection, juror());
+    sel.apply_to_evaluation(dispute_id, sid);
+
+    const APPLY_DURATION: u64 = 259_200;
+    start_cheat_block_timestamp_global(T0 + APPLY_DURATION + 1);
+    sel.advance_evaluation(dispute_id); // -> DRAWING
+    let e = sel.get_evaluation(dispute_id);
+    assert(e.phase == PHASE_DRAWING, 'expected DRAWING');
+
+    start_cheat_caller_address(fx.selection, juror());
+    sel.cancel_evaluation(dispute_id);
+}
+
+#[test]
+#[should_panic(expected: ('NotApplyingPhase',))]
+fn test_cancel_twice_reverts() {
+    let fx = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
+    let sel = sel_disp(fx);
+
+    start_cheat_block_timestamp_global(T0);
+    fund(fx, candidate(), FUND);
+    let dispute_id = request_evaluation(fx);
+
+    start_cheat_caller_address(fx.selection, candidate());
+    sel.cancel_evaluation(dispute_id);
+    // second cancel fails the phase assert (already dismissed)
+    sel.cancel_evaluation(dispute_id);
 }
 
 // ////////////////////////////////////////////////////////////////

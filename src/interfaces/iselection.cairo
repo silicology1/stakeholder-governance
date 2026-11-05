@@ -35,6 +35,10 @@ pub trait ISelection<TContractState> {
     /// Draw jurors stake-weighted for an evaluation (drawing phase).
     fn draw_jurors(ref self: TContractState, evaluation_id: u256);
 
+    /// Requester cancels an evaluation still in the applying phase, refunding
+    /// the bond (the exit when `applied_count` never reaches the minimum).
+    fn cancel_evaluation(ref self: TContractState, evaluation_id: u256);
+
     /// Commit a vote hash for a drawn stake ID.
     fn commit_vote(
         ref self: TContractState, evaluation_id: u256, stake_id: u256, commit_hash: felt252,
@@ -95,6 +99,7 @@ pub trait ISelection<TContractState> {
     fn get_stake_evaluation_count(self: @TContractState, stake_id: u256) -> u32;
     fn get_stake_finalized_count(self: @TContractState, stake_id: u256) -> u32;
     fn get_is_stake_drawn(self: @TContractState, evaluation_id: u256, stake_id: u256) -> bool;
+    fn get_evaluation_stake_index(self: @TContractState, evaluation_id: u256, stake_id: u256) -> u32;
     fn get_juror_locked_stake(self: @TContractState, juror: ContractAddress) -> u256;
     fn get_juror_unlocked_stake(self: @TContractState, juror: ContractAddress) -> u256;
     fn get_juror_open_evaluation_count(self: @TContractState, juror: ContractAddress) -> u32;

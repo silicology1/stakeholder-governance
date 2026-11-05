@@ -472,3 +472,15 @@ pub struct EvaluationDismissed {
     #[key]
     pub candidate: ContractAddress,
 }
+
+/// Emitted when the requester cancels an evaluation during the applying
+/// phase (bond refunded, applied stakes released by their owners).
+#[derive(Drop, starknet::Event)]
+pub struct EvaluationCancelled {
+    /// Indexed evaluation identifier.
+    #[key]
+    pub evaluation_id: u256,
+    /// Requester that cancelled.
+    #[key]
+    pub requester: ContractAddress,
+}

@@ -98,6 +98,10 @@ pub mod Selection {
         evaluation_stake_to_index: Map<(u256, u256), u32>,
         evaluation_index_to_stake: Map<(u256, u32), u256>,
         evaluation_next_index: Map<u256, u32>,
+        // recycled Fenwick slots: dense stack of freed one-based indices per
+        // evaluation, so apply/remove cycling cannot burn EVAL_FENWICK_SIZE
+        evaluation_free_count: Map<u256, u32>,
+        evaluation_free_index: Map<(u256, u32), u32>,
         evaluation_applied_stakes: Map<(u256, u32), u256>,
         evaluation_applied_count: Map<u256, u32>,
         evaluation_applied_slot: Map<(u256, u256), u32>,
@@ -140,6 +144,7 @@ pub mod Selection {
         EvaluationRequested: EvaluationRequested,
         EvaluationAdvanced: EvaluationAdvanced,
         EvaluationDismissed: EvaluationDismissed,
+        EvaluationCancelled: EvaluationCancelled,
         JurorDrawn: JurorDrawn,
         VoteCommitted: VoteCommitted,
         VoteRevealed: VoteRevealed,
@@ -337,10 +342,21 @@ pub mod Selection {
                 'StakeFinalizedLimitReached',
             );
 
-            let next_idx = self.evaluation_next_index.entry(evaluation_id).read();
-            assert(next_idx < EVAL_FENWICK_SIZE, 'EvaluationCapacityExceeded');
-            let fenwick_index = next_idx + 1;
-            self.evaluation_next_index.entry(evaluation_id).write(fenwick_index);
+            // reuse a reclaimed Fenwick slot when available; only mint a new
+            // slot from next_index when none is free (capacity-bounded)
+            let free_count = self.evaluation_free_count.entry(evaluation_id).read();
+            let fenwick_index = if free_count == 0 {
+                let next_idx = self.evaluation_next_index.entry(evaluation_id).read();
+                assert(next_idx < EVAL_FENWICK_SIZE, 'EvaluationCapacityExceeded');
+                self.evaluation_next_index.entry(evaluation_id).write(next_idx + 1);
+                next_idx + 1
+            } else {
+                let top = free_count - 1;
+                let idx = self.evaluation_free_index.entry((evaluation_id, top)).read();
+                self.evaluation_free_index.entry((evaluation_id, top)).write(0);
+                self.evaluation_free_count.entry(evaluation_id).write(top);
+                idx
+            };
 
             self._fenwick_add_eval(evaluation_id, fenwick_index, stake.amount);
 
@@ -397,6 +413,11 @@ pub mod Selection {
                 self._fenwick_sub_eval(evaluation_id, fenwick_index, stake.amount);
                 self.evaluation_stake_to_index.entry((evaluation_id, stake_id)).write(0);
                 self.evaluation_index_to_stake.entry((evaluation_id, fenwick_index)).write(0);
+                // reclaim the leaf slot for future applies (leaf weight is now
+                // zero, so reuse is clean)
+                let free_count = self.evaluation_free_count.entry(evaluation_id).read();
+                self.evaluation_free_index.entry((evaluation_id, free_count)).write(fenwick_index);
+                self.evaluation_free_count.entry(evaluation_id).write(free_count + 1);
             }
 
             let applied_count = e.applied_count;
@@ -578,6 +599,12 @@ pub mod Selection {
                 self._fenwick_sub_eval(evaluation_id, index, stake.amount);
                 self.evaluation_stake_to_index.entry((evaluation_id, stake_id)).write(0);
                 self.evaluation_index_to_stake.entry((evaluation_id, index)).write(0);
+                // reclaim the leaf slot: the drawn stake keeps its applied
+                // flag, so any later removal takes the zero-index path and
+                // will not double-push
+                let free_count = self.evaluation_free_count.entry(evaluation_id).read();
+                self.evaluation_free_index.entry((evaluation_id, free_count)).write(index);
+                self.evaluation_free_count.entry(evaluation_id).write(free_count + 1);
 
                 self.evaluation_drawn_stakes.entry((evaluation_id, drawn)).write(stake_id);
                 self.evaluation_is_drawn.entry((evaluation_id, stake_id)).write(true);
@@ -602,6 +629,43 @@ pub mod Selection {
                 self.emit(EvaluationAdvanced { evaluation_id, phase: PHASE_COMMIT });
             }
 
+            self.reentrancyguard.end();
+        }
+
+        /// Requester cancels an evaluation that is still applying (the exit
+        /// when `applied_count` never reaches the minimum, since
+        /// `advance_evaluation` would otherwise extend the deadline forever).
+        /// Bond is refunded; applied stakes are released by their owners via
+        /// `remove_from_evaluation`, which already accepts the dismissed
+        /// phase.
+        fn cancel_evaluation(ref self: ContractState, evaluation_id: u256) {
+            self.reentrancyguard.start();
+            let mut e = self.evaluations.entry(evaluation_id).read();
+            assert(e.phase == PHASE_APPLYING, 'NotApplyingPhase');
+
+            let requester = e.requester;
+            assert(get_caller_address() == requester, 'NotRequester');
+
+            assert(!e.bond_settled, 'BondAlreadySettled');
+            e.bond_settled = true;
+            e.phase = PHASE_DISMISSED;
+            self.evaluations.entry(evaluation_id).write(e);
+
+            self.has_active_evaluation.entry(requester).write(false);
+            self.active_evaluation_for_candidate.entry(requester).write(0);
+            self.last_evaluation_finalized.entry(requester).write(get_block_timestamp());
+
+            if e.bond_amount > 0 && requester.is_non_zero() {
+                self._token().release(requester, e.bond_amount);
+                self
+                    .emit(
+                        BondRefunded {
+                            evaluation_id, requester, amount: e.bond_amount,
+                        },
+                    );
+            }
+
+            self.emit(EvaluationCancelled { evaluation_id, requester });
             self.reentrancyguard.end();
         }
 
@@ -1171,6 +1235,12 @@ pub mod Selection {
 
         fn get_stake_finalized_count(self: @ContractState, stake_id: u256) -> u32 {
             self.stake_finalized_count.entry(stake_id).read()
+        }
+
+        fn get_evaluation_stake_index(
+            self: @ContractState, evaluation_id: u256, stake_id: u256,
+        ) -> u32 {
+            self.evaluation_stake_to_index.entry((evaluation_id, stake_id)).read()
         }
 
         fn get_is_stake_drawn(self: @ContractState, evaluation_id: u256, stake_id: u256) -> bool {
