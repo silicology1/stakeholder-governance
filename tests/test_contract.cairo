@@ -595,6 +595,283 @@ fn test_cancel_twice_reverts() {
 }
 
 // ////////////////////////////////////////////////////////////////
+//      M-1: REWARD POOL SNAPSHOT (source flip + late slashes)
+// ////////////////////////////////////////////////////////////////
+
+/// Commit hash must mirror Selection::_compute_commit_hash:
+/// (evaluation, stake, juror, score, salt)
+fn commit_hash_for(dispute_id: u256, stake_id: u256, score: i8) -> felt252 {
+    let salt: felt252 = 0xbeef;
+    let mut hash_input: Array<felt252> = array![];
+    hash_input.append(dispute_id.try_into().unwrap());
+    hash_input.append(stake_id.try_into().unwrap());
+    hash_input.append(juror().try_into().unwrap());
+    hash_input.append(score.into());
+    hash_input.append(salt);
+    poseidon_hash_span(hash_input.span())
+}
+
+/// Timelock-configures the minimum applied stakes and drawn jurors for a
+/// small deterministic jury.
+fn configure_small_jury(fx: Fixture, min_ids: u32, min_jurors: u32) {
+    let atl = atl_disp(fx);
+    start_cheat_block_timestamp_global(T0);
+    start_cheat_caller_address(fx.timelock, admin());
+    atl.propose_set_min_stake_ids(min_ids);
+    atl.propose_set_min_jurors(min_jurors);
+    start_cheat_block_timestamp_global(T0 + TIMELOCK_DURATION + 1);
+    atl.execute_set_min_stake_ids();
+    atl.execute_set_min_jurors();
+}
+
+/// Applies every stake of `stake_ids` to `dispute_id` as juror().
+fn apply_all(fx: Fixture, dispute_id: u256, stake_ids: @Array<u256>) {
+    let sel = sel_disp(fx);
+    start_cheat_caller_address(fx.selection, juror());
+    let mut i: u32 = 0;
+    loop {
+        if i >= stake_ids.len() {
+            break;
+        }
+        sel.apply_to_evaluation(dispute_id, *stake_ids.at(i));
+        i += 1;
+    }
+}
+
+/// Reveals all `stake_ids` with their matching scores in order, as juror().
+fn reveal_all(fx: Fixture, dispute_id: u256, stake_ids: @Array<u256>, scores: @Array<i8>) {
+    let sel = sel_disp(fx);
+    assert(scores.len() == stake_ids.len(), 'score count mismatch');
+    start_cheat_caller_address(fx.selection, juror());
+    let mut i: u32 = 0;
+    loop {
+        if i >= stake_ids.len() {
+            break;
+        }
+        let sid = *stake_ids.at(i);
+        sel.commit_vote(dispute_id, sid, commit_hash_for(dispute_id, sid, *scores.at(i)));
+        i += 1;
+    }
+
+    // COMMIT -> REVEAL at the commit deadline
+    const APPLY_DURATION: u64 = 259_200;
+    start_cheat_block_timestamp_global(T0 + APPLY_DURATION + 1 + COMMIT_DURATION);
+    sel.advance_evaluation(dispute_id);
+
+    let salt: felt252 = 0xbeef;
+    start_cheat_caller_address(fx.selection, juror());
+    i = 0;
+    loop {
+        if i >= stake_ids.len() {
+            break;
+        }
+        sel.reveal_vote(dispute_id, *stake_ids.at(i), *scores.at(i), salt);
+        i += 1;
+    }
+}
+
+/// A post-finalization late slash (permissionless path) must NOT flip the
+/// claim source: pool stays zero, the coherent juror still mints from budget.
+#[test]
+fn test_late_slash_keeps_budget_mode_intact() {
+    let fx = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
+    let sel = sel_disp(fx);
+    let tok = tok_disp(fx);
+
+    configure_small_jury(fx, 2, 2);
+
+    start_cheat_block_timestamp_global(T0);
+    fund(fx, juror(), FUND * 4);
+    fund(fx, candidate(), FUND);
+
+    cheat1(fx.token, juror());
+    tok.approve(juror(), STAKE * 2);
+    start_cheat_caller_address(fx.selection, juror());
+    let a = sel.create_stake(STAKE);
+    let b = sel.create_stake(STAKE);
+    let mut stake_ids: Array<u256> = array![a, b];
+
+    let dispute_id = request_evaluation(fx);
+    apply_all(fx, dispute_id, @stake_ids);
+
+    const APPLY_DURATION: u64 = 259_200;
+    start_cheat_block_timestamp_global(T0 + APPLY_DURATION + 1);
+    sel.advance_evaluation(dispute_id); // -> DRAWING
+    sel.draw_jurors(dispute_id); // both drawn -> COMMIT
+
+    // a reveals coherently; b keeps silent
+    let one_only: Array<u256> = array![a];
+    let one_score: Array<i8> = array![1];
+    reveal_all(fx, dispute_id, @one_only, @one_score);
+    finalize(fx, dispute_id);
+
+    let e = sel.get_evaluation(dispute_id);
+    assert(e.final_score == 1, 'score should be 1');
+    assert(e.reward_from_budget, 'expected budget mode');
+    assert(e.reward_pool == 0, 'reward pool should be zero');
+
+    // the profit-seeking late slash by a third party
+    start_cheat_caller_address(fx.selection, creator());
+    sel.slash_non_revealer(dispute_id, b);
+
+    let late_e = sel.get_evaluation(dispute_id);
+    assert(late_e.slash_pool == 0, 'late slash cant touch pool');
+    assert(sel.get_stake(b).amount < STAKE, 'stake should have been slashed');
+
+    // the coherent juror's claim still mints from the budget
+    let share = sel.get_juror_reward_amount(); // tc == 1
+    let bal_before = tok.balance_of(juror());
+    start_cheat_caller_address(fx.selection, juror());
+    sel.claim_juror_reward(dispute_id, a);
+    assert(tok.balance_of(juror()) == bal_before + share, 'claim must mint from budget');
+}
+
+/// With an incoherent reveal, finalization feeds the pool and coherent claims
+/// are released out of escrow in the exact amounts sized from the pool.
+#[test]
+fn test_pool_mode_claim_released_from_pool() {
+    let fx = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
+    let sel = sel_disp(fx);
+    let tok = tok_disp(fx);
+
+    configure_small_jury(fx, 3, 3);
+
+    start_cheat_block_timestamp_global(T0);
+    fund(fx, juror(), FUND * 8);
+    fund(fx, candidate(), FUND);
+
+    cheat1(fx.token, juror());
+    tok.approve(juror(), STAKE * 3);
+    start_cheat_caller_address(fx.selection, juror());
+    let a = sel.create_stake(STAKE);
+    let b = sel.create_stake(STAKE);
+    let c = sel.create_stake(STAKE);
+    let stake_ids: Array<u256> = array![a, b, c];
+
+    let dispute_id = request_evaluation(fx);
+    apply_all(fx, dispute_id, @stake_ids);
+
+    const APPLY_DURATION: u64 = 259_200;
+    start_cheat_block_timestamp_global(T0 + APPLY_DURATION + 1);
+    sel.advance_evaluation(dispute_id); // -> DRAWING
+    sel.draw_jurors(dispute_id); // all drawn -> COMMIT
+
+    // trimmed mean of (1, 1, -3): the -3 is filtered as stdev outlier,
+    // final 1; coherence band 1 -> a, b coherent, c incoherent (3000 bps)
+    let scores: Array<i8> = array![1, 1, -3];
+    reveal_all(fx, dispute_id, @stake_ids, @scores);
+    finalize(fx, dispute_id);
+
+    let e = sel.get_evaluation(dispute_id);
+    assert(e.final_score == 1, 'score should be 1');
+    assert(!e.reward_from_budget, 'expected pool mode');
+    let expected_pool = STAKE * 3000 / 10_000; // default incoherence slash bps
+    assert(e.reward_pool == expected_pool, 'pool holds the coherent slash');
+    assert(sel.get_stake(c).amount == STAKE - expected_pool, 'incoherent stake slashed');
+
+    // each coherent claim releases exactly reward_pool / tc from escrow
+    let share = expected_pool / 2;
+    let bal_before = tok.balance_of(juror());
+    start_cheat_caller_address(fx.selection, juror());
+    sel.claim_juror_reward(dispute_id, a);
+    sel.claim_juror_reward(dispute_id, b);
+    assert(tok.balance_of(juror()) == bal_before + share * 2, 'pool shares not released');
+}
+
+/// A negative-score bond is folded into the pool BEFORE the reward snapshot,
+/// so the slashed bond backs the coherent shares (previously it grew
+/// `slash_pool` after the shares were sized).
+#[test]
+fn test_negative_bond_backs_pool_shares() {
+    let fx = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
+    let sel = sel_disp(fx);
+    let tok = tok_disp(fx);
+
+    configure_small_jury(fx, 3, 3);
+
+    start_cheat_block_timestamp_global(T0);
+    fund(fx, juror(), FUND * 8);
+    fund(fx, candidate(), FUND);
+
+    cheat1(fx.token, juror());
+    tok.approve(juror(), STAKE * 3);
+    start_cheat_caller_address(fx.selection, juror());
+    let a = sel.create_stake(STAKE);
+    let b = sel.create_stake(STAKE);
+    let c = sel.create_stake(STAKE);
+    let stake_ids: Array<u256> = array![a, b, c];
+
+    let dispute_id = request_evaluation(fx);
+    apply_all(fx, dispute_id, @stake_ids);
+
+    const APPLY_DURATION: u64 = 259_200;
+    start_cheat_block_timestamp_global(T0 + APPLY_DURATION + 1);
+    sel.advance_evaluation(dispute_id);
+    sel.draw_jurors(dispute_id);
+
+    // trimmed mean of (-1, -1, 2): 2 is the stdev outlier -> final -1;
+    // coherence band 1 -> a, b coherent, c incoherent. Bond is slashed
+    // into the pool (negative score) together with the incoherence slash.
+    let scores: Array<i8> = array![-1, -1, 2];
+    reveal_all(fx, dispute_id, @stake_ids, @scores);
+    finalize(fx, dispute_id);
+
+    let e = sel.get_evaluation(dispute_id);
+    assert(e.final_score == -1, 'score should be -1');
+    assert(!e.reward_from_budget, 'expected pool mode');
+    let incoh_slash = STAKE * 3000 / 10_000;
+    let expected_pool = incoh_slash + BOND;
+    assert(e.reward_pool == expected_pool, 'bond must back the pool shares');
+    assert(sel.get_stake(c).amount == STAKE - incoh_slash, 'incoherent stake slashed');
+
+    // coherent claims release the shares sized against the full pool
+    let share = expected_pool / 2;
+    let bal_before = tok.balance_of(juror());
+    start_cheat_caller_address(fx.selection, juror());
+    sel.claim_juror_reward(dispute_id, a);
+    sel.claim_juror_reward(dispute_id, b);
+    assert(tok.balance_of(juror()) == bal_before + share * 2, 'pool shares not released');
+}
+
+#[test]
+#[should_panic(expected: ('AlreadyClaimed',))]
+fn test_claim_juror_reward_twice_reverts() {
+    let fx = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
+    let sel = sel_disp(fx);
+    let tok = tok_disp(fx);
+
+    configure_small_jury(fx, 2, 2);
+
+    start_cheat_block_timestamp_global(T0);
+    fund(fx, juror(), FUND * 4);
+    fund(fx, candidate(), FUND);
+
+    cheat1(fx.token, juror());
+    tok.approve(juror(), STAKE * 2);
+    start_cheat_caller_address(fx.selection, juror());
+    let a = sel.create_stake(STAKE);
+    let b = sel.create_stake(STAKE);
+    let stake_ids: Array<u256> = array![a, b];
+
+    let dispute_id = request_evaluation(fx);
+    apply_all(fx, dispute_id, @stake_ids);
+
+    const APPLY_DURATION: u64 = 259_200;
+    start_cheat_block_timestamp_global(T0 + APPLY_DURATION + 1);
+    sel.advance_evaluation(dispute_id);
+    sel.draw_jurors(dispute_id);
+
+    let one_only: Array<u256> = array![a];
+    let one_score: Array<i8> = array![1];
+    reveal_all(fx, dispute_id, @one_only, @one_score);
+    finalize(fx, dispute_id);
+
+    start_cheat_caller_address(fx.selection, juror());
+    sel.claim_juror_reward(dispute_id, a);
+    sel.claim_juror_reward(dispute_id, a);
+}
+
+// ////////////////////////////////////////////////////////////////
 //              EVALUATION FLOW (zero reveal - bond refund)
 // ////////////////////////////////////////////////////////////////
 

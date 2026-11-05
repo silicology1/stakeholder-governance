@@ -101,4 +101,11 @@ pub struct Evaluation {
     pub governance_tokens_minted: u256,
     /// Whether the bond has been refunded or slashed.
     pub bond_settled: bool,
+    /// Whether reward claims mint from the emission budget. Snapshotted once
+    /// at finalization; never recomputed from the (mutable) slash pool.
+    pub reward_from_budget: bool,
+    /// Reward pool as of finalization — the sum the coherent shares were
+    /// sized against (incoherence slashes + slashed bond, if any). Post-
+    /// finalization slashes are excluded from this snapshot.
+    pub reward_pool: u256,
 }

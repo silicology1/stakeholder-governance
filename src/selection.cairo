@@ -304,6 +304,8 @@ pub mod Selection {
                 slash_pool: 0,
                 governance_tokens_minted: 0,
                 bond_settled: false,
+                reward_from_budget: false,
+                reward_pool: 0,
             };
             self.evaluations.entry(evaluation_id).write(evaluation);
             self.evaluation_evidence.entry(evaluation_id).write(evidence);
@@ -887,6 +889,8 @@ pub mod Selection {
                 i += 1;
             }
 
+            // incoherence slashes and the (possibly) negative-score bond size
+            // the reward pool together, before any snapshot is taken
             let incoherence_bps: u256 = self.incoherence_slash_bps.read().try_into().unwrap_or(0);
             i = 0;
             loop {
@@ -923,10 +927,27 @@ pub mod Selection {
                 i += 1;
             }
 
+            // a negative-score bond slashed into the pool shares the reward side
+            let bond_amount = e.bond_amount;
+            let requester = e.requester;
+            let refund_bond = bond_amount > 0 && final_score >= 0;
+            let slash_bond = bond_amount > 0 && final_score < 0;
+            if slash_bond {
+                e.slash_pool += bond_amount;
+            }
+            e.bond_settled = true;
+
+            // snapshot the payout source and the backing pool exactly once:
+            // claim_juror_reward must never re-derive the source from the live
+            // slash_pool, because late slashes can grow it after finalize
+            e.reward_pool = e.slash_pool;
+            e.reward_from_budget = e.slash_pool == 0;
+
             let juror_reward_amount = self.juror_reward_amount.read();
             let total_coherent = total_coherent_weight;
 
-            let from_budget: bool = e.slash_pool == 0;
+            let from_budget: bool = e.reward_from_budget;
+            let pool: u256 = e.reward_pool;
 
             if total_coherent > 0 {
                 let tc_u256: u256 = total_coherent.try_into().unwrap_or(0);
@@ -940,7 +961,7 @@ pub mod Selection {
                         let share: u256 = if from_budget {
                             juror_reward_amount / tc_u256
                         } else {
-                            e.slash_pool / tc_u256
+                            pool / tc_u256
                         };
                         self.evaluation_juror_reward.entry((evaluation_id, stake_id)).write(share);
                     }
@@ -950,15 +971,6 @@ pub mod Selection {
 
             let mint_amount = governance_tokens_for_score(final_score);
             e.governance_tokens_minted = mint_amount;
-
-            let bond_amount = e.bond_amount;
-            let requester = e.requester;
-            let refund_bond = bond_amount > 0 && final_score >= 0;
-            let slash_bond = bond_amount > 0 && final_score < 0;
-            if slash_bond {
-                e.slash_pool += bond_amount;
-            }
-            e.bond_settled = true;
 
             if requester.is_non_zero() {
                 self.has_active_evaluation.entry(requester).write(false);
@@ -1005,12 +1017,15 @@ pub mod Selection {
             assert(stake.owner == caller, 'NotStakeOwner');
 
             let reward = self.evaluation_juror_reward.entry((evaluation_id, stake_id)).read();
-            self.evaluation_reward_claimed.entry((evaluation_id, stake_id)).write(true);
 
             if reward > 0 {
-                let from_budget = e.slash_pool == 0;
-                if from_budget {
+                // the payout source is the finalization snapshot, never the
+                // live slash_pool (late slashes can grow the pool afterwards)
+                if e.reward_from_budget {
                     if self._token().mint_from_budget(caller, reward) {
+                        // mark claimed only after the payment succeeded, so a
+                        // temporarily exhausted budget stays retryable
+                        self.evaluation_reward_claimed.entry((evaluation_id, stake_id)).write(true);
                         self
                             .emit(
                                 JurorRewardClaimed { evaluation_id, juror: caller, amount: reward },
@@ -1018,8 +1033,12 @@ pub mod Selection {
                     }
                 } else {
                     self._token().release(caller, reward);
+                    self.evaluation_reward_claimed.entry((evaluation_id, stake_id)).write(true);
                     self.emit(JurorRewardClaimed { evaluation_id, juror: caller, amount: reward });
                 }
+            } else {
+                // nothing to pay out; consume the claim entry
+                self.evaluation_reward_claimed.entry((evaluation_id, stake_id)).write(true);
             }
 
             self.reentrancyguard.end();
@@ -1547,7 +1566,14 @@ pub mod Selection {
                 self._apply_stake_slash(stake_id, slash_amount);
 
                 let mut dm = self.evaluations.entry(evaluation_id).read();
-                dm.slash_pool += slash_amount;
+                // only pre-finalization slashes feed the reward pool. After
+                // finalization the pool was snapshotted for shares; late
+                // slashes (permissionless keeper path or finalized pull) must
+                // not corrupt the settled source, nor credit shares that were
+                // never sized. Their tokens stay in escrow as surplus backing.
+                if !dm.final_score_set {
+                    dm.slash_pool += slash_amount;
+                }
                 self.evaluations.entry(evaluation_id).write(dm);
 
                 self.stake_slashed_total.entry((stake_id, evaluation_id)).write(slash_amount);
