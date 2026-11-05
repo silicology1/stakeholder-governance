@@ -59,6 +59,13 @@ pub trait ISelection<TContractState> {
     /// Claim a juror reward for a finalized evaluation.
     fn claim_juror_reward(ref self: TContractState, evaluation_id: u256, stake_id: u256);
 
+    /// Mint the candidate's pending governance grant for a finalized
+    /// evaluation (permissionless; retryable after wiring fixes).
+    fn claim_governance_grant(ref self: TContractState, evaluation_id: u256);
+
+    /// Requester pulls a finalized evaluation's non-negative-score bond.
+    fn unstake_bond(ref self: TContractState, evaluation_id: u256);
+
     // ---- admin ----
 
     /// Executed by AdminTimelock after timelock to change Selection's admin.

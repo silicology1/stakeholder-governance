@@ -306,6 +306,7 @@ pub mod Selection {
                 bond_settled: false,
                 reward_from_budget: false,
                 reward_pool: 0,
+                grant_claimed: false,
             };
             self.evaluations.entry(evaluation_id).write(evaluation);
             self.evaluation_evidence.entry(evaluation_id).write(evidence);
@@ -780,20 +781,17 @@ pub mod Selection {
                 e.final_score = 0;
                 e.final_score_set = true;
                 e.phase = PHASE_FINALIZED;
-                e.bond_settled = true;
+                // fully internal: finalize must never depend on module wiring;
+                // a pending bond becomes a requester pull (unstake_bond)
+                e.bond_settled = e.bond_amount == 0;
 
                 let requester = e.requester;
-                let bond_to_refund = e.bond_amount;
                 self.evaluations.entry(evaluation_id).write(e);
 
                 if requester.is_non_zero() {
                     self.has_active_evaluation.entry(requester).write(false);
                     self.active_evaluation_for_candidate.entry(requester).write(0);
                     self.last_evaluation_finalized.entry(requester).write(get_block_timestamp());
-                }
-                if bond_to_refund > 0 {
-                    self._token().release(requester, bond_to_refund);
-                    self.emit(BondRefunded { evaluation_id, requester, amount: bond_to_refund });
                 }
 
                 self
@@ -935,7 +933,9 @@ pub mod Selection {
             if slash_bond {
                 e.slash_pool += bond_amount;
             }
-            e.bond_settled = true;
+            // fully internal: a refund-pending bond stays claimable by the
+            // requester via unstake_bond; only the slashed bond is settled
+            e.bond_settled = !refund_bond;
 
             // snapshot the payout source and the backing pool exactly once:
             // claim_juror_reward must never re-derive the source from the live
@@ -979,24 +979,13 @@ pub mod Selection {
 
             self.evaluations.entry(evaluation_id).write(e);
             self.emit(DisputeFinalized { evaluation_id, candidate: e.candidate, final_score });
-            if mint_amount > 0 {
-                self
-                    .emit(
-                        GovernanceTokensMinted {
-                            evaluation_id, candidate: e.candidate, amount: mint_amount, final_score,
-                        },
-                    );
-            }
 
-            if mint_amount > 0 {
-                IGovernanceDispatcher { contract_address: self.governance.read() }
-                    .mint_governance_tokens(e.candidate, mint_amount);
-            }
-
-            if refund_bond {
-                self._token().release(requester, bond_amount);
-                self.emit(BondRefunded { evaluation_id, requester, amount: bond_amount });
-            } else if slash_bond {
+            // fully internal from here: no governance/token calls at finalize.
+            // The candidate's grant is claimed via `claim_governance_grant`
+            // (permissionless, retryable) and a positive-score bond via the
+            // requester's `unstake_bond`, so misconfigured module wiring can
+            // never brick finalization or lock its bookkeeping.
+            if slash_bond {
                 self.emit(BondSlashed { evaluation_id, requester, amount: bond_amount });
             }
 
@@ -1039,6 +1028,62 @@ pub mod Selection {
             } else {
                 // nothing to pay out; consume the claim entry
                 self.evaluation_reward_claimed.entry((evaluation_id, stake_id)).write(true);
+            }
+
+            self.reentrancyguard.end();
+        }
+
+        /// Mint the candidate's pending governance grant for a finalized
+        /// evaluation. Permissionless (only the candidate ever receives) and
+        /// retryable: finalize never mints inline, so a misconfigured
+        /// governance module can be repaired via timelock and the grant
+        /// claimed afterwards — finalization cannot be bricked.
+        fn claim_governance_grant(ref self: ContractState, evaluation_id: u256) {
+            self.reentrancyguard.start();
+            let mut e = self.evaluations.entry(evaluation_id).read();
+            assert(e.final_score_set, 'NotFinalized');
+            let mint_amount = e.governance_tokens_minted;
+            assert(mint_amount > 0, 'NoGrant');
+            assert(!e.grant_claimed, 'GrantAlreadyClaimed');
+
+            e.grant_claimed = true;
+            self.evaluations.entry(evaluation_id).write(e);
+
+            // on failure the tx reverts atomically (flag write rolls back),
+            // so the claim stays live and retryable
+            IGovernanceDispatcher { contract_address: self.governance.read() }
+                .mint_governance_tokens(e.candidate, mint_amount);
+
+            self
+                .emit(
+                    GovernanceTokensMinted {
+                        evaluation_id, candidate: e.candidate, amount: mint_amount,
+                        final_score: e.final_score,
+                    },
+                );
+            self.reentrancyguard.end();
+        }
+
+        /// Requester pulls a claimable evaluation bond once the evaluation is
+        /// finalized with a non-negative score (finalize no longer releases
+        /// bonds inline, keeping it free of external calls). One-shot via the
+        /// `bond_settled` flag.
+        fn unstake_bond(ref self: ContractState, evaluation_id: u256) {
+            self.reentrancyguard.start();
+            let caller = get_caller_address();
+            let mut e = self.evaluations.entry(evaluation_id).read();
+            assert(e.final_score_set, 'NotFinalized');
+            assert(e.requester == caller, 'NotRequester');
+            assert(!e.bond_settled, 'BondAlreadySettled');
+            assert(e.final_score >= 0, 'NegativeScore');
+
+            let bond_amount = e.bond_amount;
+            e.bond_settled = true;
+            self.evaluations.entry(evaluation_id).write(e);
+
+            if bond_amount > 0 {
+                self._token().release(caller, bond_amount);
+                self.emit(BondRefunded { evaluation_id, requester: caller, amount: bond_amount });
             }
 
             self.reentrancyguard.end();

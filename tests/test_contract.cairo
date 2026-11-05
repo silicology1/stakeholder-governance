@@ -872,6 +872,159 @@ fn test_claim_juror_reward_twice_reverts() {
 }
 
 // ////////////////////////////////////////////////////////////////
+//   M-5: FINALIZE DECOUPLING (grant claim + bond pull) + WIRING
+// ////////////////////////////////////////////////////////////////
+
+/// Deployment wiring sanity: every module pointer the finalize decoupling
+/// relies on must be set correctly, or grants/bond pulls would revert
+/// (retryable after a timelock repair).
+#[test]
+fn test_deployment_module_wiring() {
+    let fx = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
+
+    // the custody hub must accept both modules
+    let (token_selection, token_governance) = ctok_disp(fx).get_modules();
+    assert(token_selection == fx.selection, 'token selection module unset');
+    assert(token_governance == fx.governance, 'token governance module unset');
+
+    // the governance module must accept selection as its grant minter
+    assert(gov_disp(fx).get_selection() == fx.selection, 'governance selection unset');
+
+    // module ownership handed to timelock at deploy time
+    assert(ctok_disp(fx).get_admin() == fx.timelock, 'token admin not timelock');
+}
+
+/// Positive-score finalize no longer mints or releases inline (M-5): the
+/// grant and the bond become retryable pulls.
+#[test]
+fn test_finalize_grant_claim_and_bond_pull() {
+    let fx = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
+    let sel = sel_disp(fx);
+    let gov = gov_disp(fx);
+    let tok = tok_disp(fx);
+
+    configure_small_jury(fx, 2, 2);
+
+    start_cheat_block_timestamp_global(T0);
+    fund(fx, juror(), FUND * 4);
+    fund(fx, candidate(), FUND);
+
+    cheat1(fx.token, juror());
+    tok.approve(juror(), STAKE * 2);
+    start_cheat_caller_address(fx.selection, juror());
+    let a = sel.create_stake(STAKE);
+    let b = sel.create_stake(STAKE);
+    let stake_ids: Array<u256> = array![a, b];
+
+    let dispute_id = request_evaluation(fx);
+    apply_all(fx, dispute_id, @stake_ids);
+
+    const APPLY_DURATION: u64 = 259_200;
+    start_cheat_block_timestamp_global(T0 + APPLY_DURATION + 1);
+    sel.advance_evaluation(dispute_id);
+    sel.draw_jurors(dispute_id);
+
+    let scores: Array<i8> = array![1, 1];
+    reveal_all(fx, dispute_id, @stake_ids, @scores);
+    finalize(fx, dispute_id);
+
+    let e = sel.get_evaluation(dispute_id);
+    let grant = e.governance_tokens_minted;
+    assert(grant > 0, 'expected a positive grant');
+    assert(!e.grant_claimed, 'grant should start unclaimed');
+    assert(!e.bond_settled, 'bond pending pull');
+    assert(gov.governance_balance(candidate()) == 0, 'no mint at finalize');
+    assert(tok.balance_of(candidate()) == FUND - BOND, 'no auto bond release');
+
+    // permissionless grant claim (a keeper can drive it)
+    start_cheat_caller_address(fx.selection, creator());
+    sel.claim_governance_grant(dispute_id);
+    assert(gov.governance_balance(candidate()) == grant, 'grant not minted');
+    assert(sel.get_evaluation(dispute_id).grant_claimed, 'grant flag not set');
+
+    // requester pulls the bond
+    let bal_before = tok.balance_of(candidate());
+    start_cheat_caller_address(fx.selection, candidate());
+    sel.unstake_bond(dispute_id);
+    assert(tok.balance_of(candidate()) == bal_before + BOND, 'bond not pulled');
+    assert(sel.get_evaluation(dispute_id).bond_settled, 'bond flag not set');
+}
+
+#[test]
+#[should_panic(expected: ('GrantAlreadyClaimed',))]
+fn test_claim_governance_grant_twice_reverts() {
+    let fx = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
+    let sel = sel_disp(fx);
+    let tok = tok_disp(fx);
+
+    configure_small_jury(fx, 2, 2);
+
+    start_cheat_block_timestamp_global(T0);
+    fund(fx, juror(), FUND * 4);
+    fund(fx, candidate(), FUND);
+
+    cheat1(fx.token, juror());
+    tok.approve(juror(), STAKE * 2);
+    start_cheat_caller_address(fx.selection, juror());
+    let a = sel.create_stake(STAKE);
+    let b = sel.create_stake(STAKE);
+    let stake_ids: Array<u256> = array![a, b];
+
+    let dispute_id = request_evaluation(fx);
+    apply_all(fx, dispute_id, @stake_ids);
+
+    const APPLY_DURATION: u64 = 259_200;
+    start_cheat_block_timestamp_global(T0 + APPLY_DURATION + 1);
+    sel.advance_evaluation(dispute_id);
+    sel.draw_jurors(dispute_id);
+
+    let scores: Array<i8> = array![1, 1];
+    reveal_all(fx, dispute_id, @stake_ids, @scores);
+    finalize(fx, dispute_id);
+
+    start_cheat_caller_address(fx.selection, candidate());
+    sel.claim_governance_grant(dispute_id);
+    sel.claim_governance_grant(dispute_id);
+}
+
+#[test]
+#[should_panic(expected: ('BondAlreadySettled',))]
+fn test_unstake_bond_twice_reverts() {
+    let fx = deploy(THRESHOLD, REWARD_MULT, MINI_REWARD_MULT);
+    let sel = sel_disp(fx);
+    let tok = tok_disp(fx);
+
+    configure_small_jury(fx, 2, 2);
+
+    start_cheat_block_timestamp_global(T0);
+    fund(fx, juror(), FUND * 4);
+    fund(fx, candidate(), FUND);
+
+    cheat1(fx.token, juror());
+    tok.approve(juror(), STAKE * 2);
+    start_cheat_caller_address(fx.selection, juror());
+    let a = sel.create_stake(STAKE);
+    let b = sel.create_stake(STAKE);
+    let stake_ids: Array<u256> = array![a, b];
+
+    let dispute_id = request_evaluation(fx);
+    apply_all(fx, dispute_id, @stake_ids);
+
+    const APPLY_DURATION: u64 = 259_200;
+    start_cheat_block_timestamp_global(T0 + APPLY_DURATION + 1);
+    sel.advance_evaluation(dispute_id);
+    sel.draw_jurors(dispute_id);
+
+    let scores: Array<i8> = array![1, 1];
+    reveal_all(fx, dispute_id, @stake_ids, @scores);
+    finalize(fx, dispute_id);
+
+    start_cheat_caller_address(fx.selection, candidate());
+    sel.unstake_bond(dispute_id);
+    sel.unstake_bond(dispute_id);
+}
+
+// ////////////////////////////////////////////////////////////////
 //              EVALUATION FLOW (zero reveal - bond refund)
 // ////////////////////////////////////////////////////////////////
 
@@ -938,9 +1091,18 @@ fn test_zero_reveal_refunds_bond() {
     sel_disp(fx).finalize_evaluation(dispute_id);
 
     let d = sel.get_dispute(dispute_id);
-    assert(d.bond_settled, 'bond should be settled');
+    // zero-reveal finalize no longer releases the bond inline: it becomes a
+    // retryable requester pull (M-5 decoupling)
     assert(d.final_score == 0, 'score should be neutral');
+    assert(!d.bond_settled, 'bond should remain unset');
     assert(gov.governance_balance(candidate()) == 0, 'no gov for zero reveal');
+    assert(tok.balance_of(candidate()) == FUND - BOND, 'bond not auto-released');
+
+    start_cheat_caller_address(fx.selection, candidate());
+    sel_disp(fx).unstake_bond(dispute_id);
+
+    let d = sel.get_dispute(dispute_id);
+    assert(d.bond_settled, 'bond settled after pull');
     assert(tok.balance_of(candidate()) == FUND, 'bond should be refunded');
 }
 

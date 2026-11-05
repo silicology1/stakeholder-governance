@@ -108,4 +108,7 @@ pub struct Evaluation {
     /// sized against (incoherence slashes + slashed bond, if any). Post-
     /// finalization slashes are excluded from this snapshot.
     pub reward_pool: u256,
+    /// Whether the candidate's pending governance grant has already been
+    /// minted through `claim_governance_grant` (finalize never mints inline).
+    pub grant_claimed: bool,
 }
