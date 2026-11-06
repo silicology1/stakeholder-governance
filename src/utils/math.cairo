@@ -98,9 +98,9 @@ pub fn score_to_u256(score: i64) -> u256 {
 }
 
 /// Returns the non-transferable governance-token grant size for a positive
-/// final score. Scores 1-3 grant 1,000 tokens per score unit, while scores
-/// 4-5 grant 40,000 or 50,000 tokens respectively. Zero and negative scores
-/// grant nothing.
+/// final score. The schedule is linear, granting 1,000 tokens per score
+/// unit, so a score 4 pays 4,000 and a score 5 pays 5,000. Zero and
+/// negative scores grant nothing.
 pub fn governance_tokens_for_score(final_score: i64) -> u256 {
     if final_score == 1 {
         1_000_000_000_000_000_000_000
@@ -109,9 +109,9 @@ pub fn governance_tokens_for_score(final_score: i64) -> u256 {
     } else if final_score == 3 {
         3_000_000_000_000_000_000_000
     } else if final_score == 4 {
-        40_000_000_000_000_000_000_000
+        4_000_000_000_000_000_000_000
     } else if final_score == 5 {
-        50_000_000_000_000_000_000_000
+        5_000_000_000_000_000_000_000
     } else {
         0
     }
